@@ -1,0 +1,9 @@
+config BR2_PACKAGE_EDGEGUARD_RK_AB
+bool "edgeguard-rk-ab"
+depends on BR2_PACKAGE_RAUC
+help
+  EdgeGuard Rockchip native A/B integration for RAUC.
+
+  Installs:
+    /usr/bin/edgeguard-rk-abctl
+    /usr/libexec/rauc/edgeguard-rk-ab-backend

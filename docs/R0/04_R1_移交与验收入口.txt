@@ -1,0 +1,84 @@
+R1 移交包与进入条件
+Wi-Fi / BLE BSP Bring-up 的执行基线
+版本：R0-FINAL · 日期：2026-08-31
+
+READY	R0 已完成，R1 可从“无线已经能枚举/扫描”这一状态直接进入网络连接与 BLE 可发现性验证。
+
+1. R1 一句话目标
+让 RK3588 板载 Wi-Fi/BLE 在产品化 Buildroot 下稳定工作：Wi-Fi 完成连接、DHCP、DNS、NTP、断线重连和 OTA Server 连通；BLE 完成 controller/advertising/PC 或手机发现。
+2. R1 不做什么
+不做 RAUC 安装、不改 A/B GPT
+不做 Remote OTA Agent 完整状态机
+不做 BLE provisioning GATT 业务协议
+不做 OTA Server 产品化
+3. R1 输入基线
+输入	状态
+Kernel 5.10.209 + Buildroot 2021.11	固定
+8733bu / rtk_btusb vermagic	已匹配 5.10.209
+wlan0 + AP scan	已通过
+hci0 + BlueZ	已通过
+userdata	已存在；可用于网络配置/日志持久化候选
+RTC	电池待更换；HTTPS 前关闭
+
+4. R1 推荐执行顺序
+确认 Buildroot 包：wpa_supplicant、iw、udhcpc、BlueZ utilities、ca-certificates、NTP client（按方案选择）。
+清理 regulatory.db / country code，验证 2.4 GHz 与 5 GHz 扫描行为。
+以 wpa_supplicant + udhcpc 建立 Wi-Fi Station 连接，不以 ConnMan 作为最终产品依赖。
+验证 DNS、默认路由与 OTA Server ping/HTTP 可达。
+执行掉 AP/重启 AP/信号恢复等断线重连实验。
+配置 BlueZ controller advertising，使手机/PC 可扫描发现。
+更换 RTC 电池并验证断电保持；建立 boot→RTC→NTP→HTTPS 的时间链路。
+5. R1 最小命令集
+# Wi-Fi
+rfkill unblock all
+ip link set wlan0 up
+iw dev wlan0 scan
+wpa_supplicant -B -i wlan0 -c /etc/wpa_supplicant.conf
+udhcpc -i wlan0
+ip addr show wlan0
+ip route
+cat /etc/resolv.conf
+ping -c 4 <OTA_SERVER_IP>
+
+# Bluetooth
+bluetoothctl list
+bluetoothctl show
+bluetoothctl power on
+bluetoothctl discoverable on
+bluetoothctl pairable on
+
+# Time
+date
+hwclock -r
+# RTC fixed 后再验证 NTP / TLS
+6. R1 完成 checklist
+[ ] wlan0 stable up
+[ ] scan AP
+[ ] wpa_supplicant connect
+[ ] DHCP address
+[ ] default route + DNS
+[ ] ping OTA Server
+[ ] disconnect/reconnect
+[ ] hci0
+[ ] BLE advertising
+[ ] phone/PC discovery
+[ ] RTC battery replaced
+[ ] time valid before HTTPS
+[ ] R1 logs/report archived
+7. R1 输出给 R2/R3 的接口
+稳定的 wlan0 网络管理脚本/配置。
+设备网络状态检测 API（Agent 可调用）。
+统一 CA bundle 与时间同步策略。
+BlueZ 初始化与 advertising 基线。
+R1 failure matrix：无 AP、密码错误、DHCP 失败、DNS 失败、无线掉线、BT controller 异常。
+参考资料
+项目证据：
+实板串口/终端日志：2026-08-31，烧写统一 Buildroot rootfs 后验证
+SDK 检索记录：device/rockchip/rk3588/parameter.txt 与 parameter-ab.txt
+U-Boot 编译后 .config 与源码检索：2026-08-31
+外部资料：
+正点原子：ATK-DLRK3588 板载 USB Wi-Fi 测试（RTL8733BU）
+正点原子：ATK-DLRK3588 板载 USB 蓝牙测试
+正点原子：ATK-DLRK3588 RTC 时钟测试
+RAUC latest：Bootloader Integration / U-Boot / Custom Backend
+U-Boot：Android A/B updates

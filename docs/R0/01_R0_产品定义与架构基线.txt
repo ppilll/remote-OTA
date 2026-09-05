@@ -1,0 +1,94 @@
+R0 产品定义与总体架构基线
+后续 R1-R7 的产品边界与职责约束
+版本：R0-FINAL · 日期：2026-08-31
+
+1. 产品目标
+EdgeGuard Remote OTA 是面向嵌入式 Linux 设备的远程 A/B OTA 与可靠性验证平台。第一版目标不是云平台，而是单板 + LAN OTA Server + Wi-Fi Remote OTA + BLE Provision/Trigger + RAUC A/B + rollback/watchdog 的完整闭环。
+2. 三层职责边界
+OTA Server / Phone-PC
+        |
+        | HTTPS / BLE
+        v
++------------------------------+
+| Layer 1 Transport/Control    |
+| Wi-Fi, BLE, HTTPS, download  |
+| provisioning, report         |
++--------------+---------------+
+               |
+               v
++------------------------------+
+| Remote OTA Agent             |
+| orchestration/state machine  |
++--------------+---------------+
+               |
+               v
++------------------------------+
+| Layer 2 Update Engine: RAUC  |
+| signature/compatible/install |
++--------------+---------------+
+               |
+               v
++------------------------------+
+| Layer 3 Boot & Recovery      |
+| slot select / health /       |
+| mark-good / fallback / WDT   |
++------------------------------+
+组件	负责	明确不负责
+Wi-Fi	OTA 主数据链路、HTTPS 下载、状态上报	不直接写 A/B 分区
+BLE	设备发现、Wi-Fi provisioning、版本/触发/进度/结果	MVP 不传完整 rootfs bundle
+Remote OTA Agent	版本查询、precheck、下载、状态持久化、调用 RAUC、上报	不直接写 /dev/mmcblk*
+RAUC	bundle 验签、compatible、inactive slot 安装、slot 状态接口	不负责 Wi-Fi 与业务协议
+Boot layer	选择启动槽、失败尝试、fallback	不依赖远端网络可用
+Health check	决定新系统是否可 mark-good	不负责下载/安装
+Watchdog	最后一道失效恢复	不替代 boot rollback
+
+3. R0 锁定的目标平台
+属性	基线
+Board	ATK-DLRK3588（官方资料对应 ATK-DLRK3588B 系列）
+SoC	Rockchip RK3588
+Architecture	AArch64
+Build System	Buildroot 2021.11（vendor SDK）
+Kernel	Linux 5.10.209（当前项目基线）
+Bootloader	Rockchip vendor U-Boot 2017.09
+Wi-Fi/BT	RTL8733BU，USB 2.0 combo
+Storage	eMMC，保留独立 userdata/data
+OTA engine	RAUC
+
+4. Remote OTA Agent 状态机草案
+IDLE
+ -> CHECK_NETWORK
+ -> CHECK_UPDATE -- no update --> IDLE
+ -> PRECHECK
+ -> DOWNLOADING
+ -> VERIFY_DOWNLOAD
+ -> RAUC_VERIFY
+ -> INSTALLING
+ -> REBOOT_PENDING
+ -> BOOT_NEW_SLOT
+ -> HEALTH_CHECK
+       | PASS -> MARK_GOOD -> REPORT_SUCCESS
+       | FAIL -> REBOOT/FALLBACK -> REPORT_ROLLBACK
+
+异常：NETWORK_ERROR / DOWNLOAD_INTERRUPTED / TLS_ERROR /
+DISK_FULL / VERIFY_ERROR / RAUC_ERROR / INSTALL_ERROR / ROLLBACK
+5. 安全边界
+HTTPS = transport security：服务器认证、链路加密、防中间人。
+RAUC signature = artifact security：bundle 来源与完整性。两者不可互相替代。
+BLE 实验阶段可先跑流程，但 Wi-Fi password 不能作为生产方案长期裸传；生产版需要 pairing/bonding/encrypted link/授权。
+第一版不引入 TPM/HSM/Secure Boot；但文档明确实验 device_id 与生产设备身份体系不同。
+6. MVP 明确不做
+云 IoT 平台/Kubernetes/多租户 fleet management
+灰度发布、差分 OTA、CDN
+BLE 全镜像传输、手机 App
+第一版 Secure Boot/TPM/HSM
+参考资料
+项目证据：
+实板串口/终端日志：2026-08-31，烧写统一 Buildroot rootfs 后验证
+SDK 检索记录：device/rockchip/rk3588/parameter.txt 与 parameter-ab.txt
+U-Boot 编译后 .config 与源码检索：2026-08-31
+外部资料：
+正点原子：ATK-DLRK3588 板载 USB Wi-Fi 测试（RTL8733BU）
+正点原子：ATK-DLRK3588 板载 USB 蓝牙测试
+正点原子：ATK-DLRK3588 RTC 时钟测试
+RAUC latest：Bootloader Integration / U-Boot / Custom Backend
+U-Boot：Android A/B updates

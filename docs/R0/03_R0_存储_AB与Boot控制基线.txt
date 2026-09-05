@@ -1,0 +1,83 @@
+R0 存储 / A-B / Boot 控制基线
+RK3588 后续 RAUC 集成的关键设计依据
+版本：R0-FINAL · 日期：2026-08-31
+
+1. 当前实板分区
+分区	大小	用途
+mmcblk0p1 / uboot	4 MiB	bootloader
+mmcblk0p2 / misc	4 MiB	boot/recovery/A-B 元数据候选区
+mmcblk0p3 / boot	64 MiB	当前 boot image
+mmcblk0p4 / recovery	128 MiB	recovery
+mmcblk0p5 / backup	32 MiB	vendor backup
+mmcblk0p6 / rootfs	14 GiB	当前 root filesystem
+mmcblk0p7 / oem	128 MiB	vendor OEM
+mmcblk0p8 / userdata	约 43 GiB	持久化数据；EdgeGuard /data 候选
+
+当前 kernel cmdline 使用 root=PARTUUID=614e0000-0000；SDK parameter.txt 中完整 UUID 为 614e0000-0000-4b53-8000-1d28000054a9。
+2. Vendor normal 与 A/B parameter 对比
+normal parameter.txt
+uboot | misc | boot(64M) | recovery(128M) | backup(32M)
+| rootfs(14G) | oem(128M) | userdata(grow)
+
+parameter-ab.txt
+uboot | misc | boot_a(64M) | boot_b(128M) | backup(32M)
+| system_a(7G) | system_b(7G) | oem(128M) | userdata(grow)
+SDK 还明确将 system/system_[ab] 映射到 rootfs.img；RK_AB_UPDATE 开启时 firmware 配置默认选择 parameter-ab.txt。因此 vendor SDK 已提供 A/B 分区与打包 plumbing。
+3. 容量可行性
+指标	结果
+当前 rootfs.ext2	约 1.38 GiB
+Vendor A/B rootfs slot	system_a=7 GiB，system_b=7 GiB
+单 slot 余量	约 5.6 GiB 以上
+结论	A/B 容量可行，不需要自行重新发明 slot 大小
+
+4. U-Boot 配置结论
+发现	结论
+CONFIG_ENV_SIZE=0x8000	仅说明 environment 缓冲区尺寸 32 KiB。
+CONFIG_ENV_IS_IN_MMC / BLK_DEV / FLASH / SPI_FLASH 等均未开启	当前构建没有标准持久化 U-Boot environment backend；不能仅靠 Buildroot 勾选 fw_printenv 就获得可写环境。
+CONFIG_ANDROID_AB is not set	U-Boot 标准 Android A/B 主开关当前未开启。
+CONFIG_SPL_AB=y	SPL 包含 Rockchip/AVB 相关 A/B 代码路径，但不能等同于完整 userspace A/B boot-control 已启用。
+CONFIG_AVB_LIBAVB_AB=y	AVB 库具备 A/B 支持。
+misc 相关 android_bootloader_message / android_ab 源码存在	SDK 有 A/B 元数据实现基础；实际启用路径仍需后续实板验证。
+RK_AB_UPDATE -> parameter-ab.txt	SDK build system 有明确 A/B update 开关和 A/B image packaging 流程。
+
+5. fw_printenv / fw_setenv 的正确定位
+Buildroot 的 uboot-tools 可以安装 fw_printenv/fw_setenv，但“工具存在”不等于“当前 U-Boot environment 可持久化访问”。RAUC 标准 bootloader=uboot 需要一个真实、可写、最好冗余的 U-Boot environment backend，以及正确的 /etc/fw_env.config。当前 U-Boot .config 不满足这一前提。
+因此 R0 不把 fw_printenv 作为当前 A/B 方案。后续若选择 RAUC 标准 U-Boot backend，则需要先设计/启用持久化 environment；若选择 Rockchip misc A/B，则 fw_printenv 可保留为调试工具但不承担 slot state。
+6. 推荐的后续 boot-control 决策树
+优先路径 P1：Rockchip native A/B
+RK_AB_UPDATE + parameter-ab
+        |
+        v
+misc A/B metadata / slot suffix
+        |
+        v
+U-Boot slot selection + boot attempts
+        |
+        v
+RAUC bootloader=custom adapter
+
+验证失败/语义不足
+        |
+        v
+回退路径 P2：RAUC standard U-Boot backend
+persistent redundant U-Boot environment
++ fw_printenv/fw_setenv
++ BOOT_ORDER / BOOT_A_LEFT / BOOT_B_LEFT
++ custom U-Boot boot script
+P1 是当前推荐的验证顺序，不是“已经完成的实现”。进入真正 A/B bring-up 后必须证明：slot 选择、tries_remaining/成功标记、bad slot、自动 fallback、掉电后的 metadata 一致性。
+7. 后续禁止事项
+不要直接把 parameter-ab.txt 烧入生产板，必须先建立恢复镜像/备份并验证 boot_a/boot_b 的实际行为。
+不要把 U-Boot printenv 中的默认 partitions 变量当作真实 GPT；source of truth 是实际 GPT + SDK parameter 文件。
+不要让 Remote OTA Agent 直接写 system_a/system_b；安装仍由 RAUC slot abstraction 完成。
+不要在未证明 boot-control 的情况下宣布 rollback 已实现。
+参考资料
+项目证据：
+实板串口/终端日志：2026-08-31，烧写统一 Buildroot rootfs 后验证
+SDK 检索记录：device/rockchip/rk3588/parameter.txt 与 parameter-ab.txt
+U-Boot 编译后 .config 与源码检索：2026-08-31
+外部资料：
+正点原子：ATK-DLRK3588 板载 USB Wi-Fi 测试（RTL8733BU）
+正点原子：ATK-DLRK3588 板载 USB 蓝牙测试
+正点原子：ATK-DLRK3588 RTC 时钟测试
+RAUC latest：Bootloader Integration / U-Boot / Custom Backend
+U-Boot：Android A/B updates

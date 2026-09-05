@@ -1,0 +1,47 @@
+R0 阶段结项报告
+EdgeGuard Remote OTA · ATK-DLRK3588 / RK3588
+版本：R0-FINAL · 日期：2026-08-31
+
+PASS	R0“产品定义与无线硬件能力盘点”完成。RTC 电池与 boot-control 实现细节作为后续关闭项，不阻塞进入 R1。
+
+1. R0 结论
+R0 的核心目标是确认目标硬件、无线能力、BSP 基线、第一版 Remote OTA 传输边界，以及确认 A/B OTA 在存储与启动体系上不存在明显硬件阻塞。当前证据已满足该目标。
+领域	结论	证据/说明
+硬件平台	PASS	ATK-DLRK3588，Rockchip RK3588，AArch64，eMMC 启动。
+BSP 一致性	PASS	Linux 5.10.209；Buildroot 2021.11；8733bu.ko 与 rtk_btusb.ko vermagic 均为 5.10.209。
+Wi-Fi	PASS	RTL8733BU/USB；wlan0 已出现；解除 rfkill 后可扫描实际 AP。
+Bluetooth/BLE	PASS	rtk_btusb 加载；hci0 UP RUNNING；BlueZ 可见；支持 central/peripheral 与 advertising。
+存储	PASS	当前 GPT 与 vendor parameter.txt 一致；14 GiB rootfs + 大容量 userdata。
+A/B 容量	PASS	rootfs.ext2 ≈1.38 GiB；SDK parameter-ab 提供 system_a/system_b 各 7 GiB。
+RTC	DEFERRED	RTC 芯片/驱动存在，但纽扣电池低电压；更换电池后在 HTTPS 前关闭。
+Boot control	DESIGN BASELINE	U-Boot 具备 Rockchip A/B 相关代码与 SDK A/B 开关，但当前 CONFIG_ANDROID_AB 未开启，标准 U-Boot env backend 也未配置；后续实装阶段验证。
+
+2. R0 退出标准与状态
+目标板、SoC、架构、存储介质均已确认。
+板载 Wi-Fi/Bluetooth 芯片、总线、驱动与 firmware 链路已确认并运行。
+Wi-Fi 已完成 RF smoke test；BLE controller 已完成 HCI/BlueZ smoke test。
+Buildroot 与 kernel module ABI 不一致问题已修复，并形成可复现的同 SDK 构建基线。
+当前 eMMC 分区与 SDK normal/A-B parameter 文件均已确认。
+Remote OTA 第一版继续坚持 Wi-Fi=主传输、BLE=配网/控制/状态，BLE 不传完整 bundle。
+A/B boot-control 的最终实现尚未进入执行阶段，符合 R0 边界；后续进入 Boot/RAUC 阶段时必须做实板状态机验证。
+3. 已知问题与关闭时点
+ID	问题	影响	关闭时点
+R0-KNOWN-001	RTC backup battery depleted	系统冷启动时间可能回到 1970，影响 TLS 证书有效期校验。	R1 结束前或 HTTPS 开启前
+R0-KNOWN-002	regulatory.db 缺失	无线 regulatory-domain 需清理；当前 AP 扫描已成功。	R1 Wi-Fi BSP 清理
+R0-KNOWN-003	U-Boot 交互执行 mmc part 曾 timeout	不影响 Linux 正常读取 GPT；后续 Boot bring-up 需复测。	A/B boot bring-up
+R0-DESIGN-001	最终 boot-control backend 未锁死	不阻塞 R1；必须在 RAUC A/B 实装前做决策验证。	RAUC/U-Boot 集成前
+
+4. 后续关键技术决策
+优先验证路径：Rockchip SDK 的 RK_AB_UPDATE / parameter-ab / misc A/B 元数据链路，并将 RAUC 通过 custom bootloader backend 对接。如果 vendor A/B 不能提供稳定的 boot-attempt / mark-good / rollback 语义，再回退到“为 U-Boot 增加持久化 environment + RAUC bootloader=uboot + BOOT_ORDER/BOOT_x_LEFT”的方案。
+原因：当前编译配置明确显示 CONFIG_ANDROID_AB 未开启，同时没有 CONFIG_ENV_IS_IN_MMC 等标准持久化 environment backend；因此两条路径都不能在 R0 阶段假定为“开箱即用”。
+参考资料
+项目证据：
+实板串口/终端日志：2026-08-31，烧写统一 Buildroot rootfs 后验证
+SDK 检索记录：device/rockchip/rk3588/parameter.txt 与 parameter-ab.txt
+U-Boot 编译后 .config 与源码检索：2026-08-31
+外部资料：
+正点原子：ATK-DLRK3588 板载 USB Wi-Fi 测试（RTL8733BU）
+正点原子：ATK-DLRK3588 板载 USB 蓝牙测试
+正点原子：ATK-DLRK3588 RTC 时钟测试
+RAUC latest：Bootloader Integration / U-Boot / Custom Backend
+U-Boot：Android A/B updates

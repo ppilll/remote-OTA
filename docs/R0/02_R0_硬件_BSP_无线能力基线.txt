@@ -1,0 +1,63 @@
+R0 硬件 / BSP / 无线能力基线
+实板验证结果与 R1 可复用诊断基线
+版本：R0-FINAL · 日期：2026-08-31
+
+PASS	无线硬件、驱动、firmware、RF 扫描与 BLE HCI/BlueZ 能力均已确认。
+
+1. BSP 版本基线
+项	值	备注
+Kernel	5.10.209	自 vendor SDK 重新编译；项目当前固定基线
+Rootfs	Buildroot 2021.11	alientek_rk3588 构建产物
+Wi-Fi module	8733bu.ko	vermagic=5.10.209 SMP mod_unload aarch64
+BT module	rtk_btusb.ko	vermagic=5.10.209 SMP mod_unload aarch64
+BlueZ	5.77	实板 bluetoothctl 输出
+
+2. 曾发现并修复的问题
+旧 rootfs 中的 8733bu.ko / rtk_btusb.ko 是按 Linux 5.10.160 编译，而运行 kernel 为 5.10.209，导致 version magic 不匹配。重新用同一 SDK 构建 Buildroot 后，两个模块 vermagic 均与运行内核一致。
+后续发布纪律：kernel、vendor kernel modules、Buildroot rootfs 必须作为同一个 release baseline 构建与归档；禁止“只换 kernel、不更新依赖模块”的非可复现组合。
+3. Wi-Fi 验证证据
+板载 RTL8733BU 被 USB 与设备树识别。
+8733bu module 成功加载，wlan0 / wlan1 出现。
+rfkill unblock all 后，phy0 无 soft/hard block。
+ip link set wlan0 up 成功。
+iw dev wlan0 scan 成功扫描 JXUST-WLAN，证明 USB→driver→cfg80211→RF 接收链路工作。
+R1 可复用 smoke commands:
+rfkill unblock all
+ip link set wlan0 up
+iw dev
+iw dev wlan0 scan
+
+dmesg | grep -Ei '8733|wlan|wifi|firmware|regulatory'
+4. Bluetooth / BLE 验证证据
+rtk_btusb module 成功加载并下载 rtl8733bu firmware/config。
+hci0 存在且 UP RUNNING，Bus=USB，Manufacturer=Realtek。
+bluetoothctl 可见 controller；Roles 同时包含 central 与 peripheral。
+Advertising 支持，满足后续 BlueZ GATT peripheral 的硬件/BSP 前提。
+R1 可复用 smoke commands:
+rfkill unblock all
+bluetoothctl list
+bluetoothctl show
+ls -l /sys/class/bluetooth/
+hciconfig -a
+5. RTC / 时间基线
+RTC 设备与驱动已存在（/dev/rtc0，pcf8563-compatible），但当前纽扣电池低电压，hwclock 无法得到可信时间。该问题已确认是硬件耗材问题，不再作为 R0 blocker。
+状态	处理
+当前	RTC low voltage；system time 可能回到 1970
+关闭动作	更换 CR1220/兼容电池；date -s；hwclock -w；断电后验证 hwclock 继续前进
+强制截止	HTTPS/TLS certificate validation 之前必须关闭
+
+6. R1 已知问题
+regulatory.db 当前缺失：不阻塞 R0，R1 需确认 regulatory domain 与 2.4/5 GHz 行为。
+R1 产品网络管理仍优先使用 wpa_supplicant + udhcpc；ConnMan 只作为 vendor baseline 对照。
+R1 应验证 Wi-Fi 连接、DHCP、DNS、NTP、断线重连和 OTA Server 可达性。
+参考资料
+项目证据：
+实板串口/终端日志：2026-08-31，烧写统一 Buildroot rootfs 后验证
+SDK 检索记录：device/rockchip/rk3588/parameter.txt 与 parameter-ab.txt
+U-Boot 编译后 .config 与源码检索：2026-08-31
+外部资料：
+正点原子：ATK-DLRK3588 板载 USB Wi-Fi 测试（RTL8733BU）
+正点原子：ATK-DLRK3588 板载 USB 蓝牙测试
+正点原子：ATK-DLRK3588 RTC 时钟测试
+RAUC latest：Bootloader Integration / U-Boot / Custom Backend
+U-Boot：Android A/B updates

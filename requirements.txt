@@ -1,0 +1,7 @@
+fastapi==0.124.4
+starlette==0.44.0
+uvicorn==0.33.0
+pydantic==2.10.5
+anyio==4.5.2
+httpx==0.28.1
+pytest==8.3.4

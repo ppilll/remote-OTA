@@ -1,0 +1,23 @@
+[Unit]
+Description=EdgeGuard R2 OTA Server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=edgeguard-ota
+Group=edgeguard-ota
+WorkingDirectory=/opt/edgeguard-ota
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/opt/edgeguard-ota/.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 1
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadOnlyPaths=/opt/edgeguard-ota
+
+[Install]
+WantedBy=multi-user.target
