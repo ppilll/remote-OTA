@@ -1,0 +1,14 @@
+[update]
+compatible=EdgeGuard-ATK-DLRK3588-RK3588
+version=1.1.0
+description=EdgeGuard Remote OTA R3-C signed candidate
+build=r3c-real-1.1.0-001
+
+[bundle]
+format=plain
+
+[image.rootfs]
+filename=rootfs.ext4
+
+[image.boot]
+filename=boot.img

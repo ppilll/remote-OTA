@@ -1,0 +1,179 @@
+#!/bin/sh
+set -u
+
+ABCTL=/usr/bin/edgeguard-rk-abctl
+
+err()
+{
+    echo "edgeguard-rk-ab-backend: $*" >&2
+    exit 1
+}
+
+valid_slot()
+{
+    case "$1" in
+        a|b)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+native_state()
+{
+    slot="$1"
+
+    valid_slot "$slot" \
+        || err "invalid slot '$slot'"
+
+    state="$(
+        "$ABCTL" get-native-state "$slot"
+    )" || err \
+        "cannot read native state for slot $slot"
+
+    case "$state" in
+        confirmed-good|pending|bad)
+            printf '%s\n' "$state"
+            ;;
+        *)
+            err \
+                "unexpected native state '$state' for slot $slot"
+            ;;
+    esac
+}
+
+[ "$#" -ge 1 ] \
+    || err "missing verb"
+
+verb="$1"
+shift
+
+case "$verb" in
+
+get-primary)
+
+    [ "$#" -eq 0 ] \
+        || err "get-primary takes no arguments"
+
+    primary="$(
+        "$ABCTL" get-primary
+    )" || err "get-primary failed"
+
+    valid_slot "$primary" \
+        || err "invalid primary '$primary'"
+
+    # Query stdout contains the required ABI value only.
+    printf '%s\n' "$primary"
+    ;;
+
+
+get-state)
+
+    [ "$#" -eq 1 ] \
+        || err "get-state requires slot"
+
+    slot="$1"
+
+    state="$(
+        native_state "$slot"
+    )" || exit 1
+
+    case "$state" in
+
+        confirmed-good|pending)
+
+            # Intentional lossy projection:
+            #
+            # confirmed-good -> RAUC good
+            # pending        -> RAUC good
+            printf '%s\n' good
+            ;;
+
+        bad)
+
+            printf '%s\n' bad
+            ;;
+
+        *)
+
+            err \
+                "unexpected native state '$state'"
+            ;;
+    esac
+    ;;
+
+
+set-primary)
+
+    [ "$#" -eq 1 ] \
+        || err "set-primary requires slot"
+
+    slot="$1"
+
+    valid_slot "$slot" \
+        || err "invalid slot '$slot'"
+
+    # abctl owns:
+    #
+    # current identity fail-closed
+    # single-writer locking
+    # Native pending mutation
+    # CRC/write/fsync/read-back
+    #
+    # Keep backend stdout clean.
+    "$ABCTL" \
+        set-primary "$slot" \
+        1>&2 \
+        || err "native set-primary failed"
+    ;;
+
+
+set-state)
+
+    [ "$#" -eq 2 ] \
+        || err \
+            "set-state requires slot and good|bad"
+
+    slot="$1"
+    desired="$2"
+
+    valid_slot "$slot" \
+        || err "invalid slot '$slot'"
+
+    case "$desired" in
+
+        bad)
+
+            "$ABCTL" \
+                mark-bad "$slot" \
+                1>&2 \
+                || err "native mark-bad failed"
+            ;;
+
+
+        good)
+
+            # Current-only enforcement is inside
+            # the shared Native implementation.
+            "$ABCTL" \
+                mark-good "$slot" \
+                1>&2 \
+                || err "native mark-good failed"
+            ;;
+
+
+        *)
+
+            err "state must be good or bad"
+            ;;
+    esac
+    ;;
+
+
+*)
+
+    err "unsupported verb '$verb'"
+    ;;
+esac
