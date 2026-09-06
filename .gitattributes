@@ -1,0 +1,33 @@
+*.c text eol=lf
+*.h text eol=lf
+*.sh text eol=lf
+*.py text eol=lf
+*.md text eol=lf
+*.mk text eol=lf
+*.conf text eol=lf
+*.in text eol=lf
+*.json text eol=lf
+*.raucm text eol=lf
+*.template text eol=lf
+*.txt text eol=lf
+*.desc text eol=lf
+*.pem text eol=lf
+.gitignore text eol=lf
+Makefile text eol=lf
+Kconfig text eol=lf
+Config.in text eol=lf
+S[0-9][0-9]* text eol=lf
+edgeguard-rk-ab-backend text eol=lf
+edgeguard-rk-ab-preinstall text eol=lf
+
+# Firmware, filesystem and signed bundle artifacts are bytes, never text.
+*.raucb -text
+*.img -text
+*.ext4 -text
+*.bin -text
+*.dtb -text
+*.itb -text
+*.pyc -text
+*.gz -text
+*.xz -text
+*.zip -text
