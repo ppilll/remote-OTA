@@ -13,4 +13,10 @@ OtaDownloadAction ota_download_response(uint64_t partial, uint64_t expected, lon
  * No automatic transport retry; one bounded recovery GET is permitted for 416. */
 gboolean ota_download_bundle(const OtaConfig *config, const OtaManifest *manifest,
                              gboolean *retryable, OtaError *error);
+/* Revalidate a completed bundle after a crash between durable publication and
+ * state advancement. No network or mutation is performed. */
+gboolean ota_download_validate_bundle(const OtaConfig *config,
+                                      const OtaManifest *manifest, OtaError *error);
+/* Called only from PRECHECK for a newly persisted attempt, before DOWNLOADING. */
+gboolean ota_download_discard_partial(const OtaConfig *config, OtaError *error);
 #endif

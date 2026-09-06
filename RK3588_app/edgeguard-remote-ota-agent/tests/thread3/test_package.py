@@ -100,6 +100,7 @@ class PackageTests(unittest.TestCase):
         self.assertEqual(config["reporting"]["mode"], "legacy")
         self.assertEqual(config["health"]["hook"], "")
         self.assertEqual(config["rauc"]["binary"], "/usr/bin/rauc")
+        self.assertEqual(config["server"]["request_timeout_sec"], "600")
         source = (AGENT / "src/config.c").read_text(encoding="utf-8")
         expected = set(re.findall(r'\{"([a-z_]+)", "([a-z_]+)"\}', source))
         actual = {(section, key) for section in config.sections() for key in config[section]}
@@ -142,7 +143,12 @@ class PackageTests(unittest.TestCase):
         for name in files:
             path = target / name
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text("fixture", encoding="utf-8")
+            if name in ("usr/libexec/rauc/edgeguard-rk-ab-backend",
+                        "usr/libexec/rauc/edgeguard-rk-ab-preinstall",
+                        "etc/init.d/S99edgeguard-remote-ota"):
+                path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            else:
+                path.write_text("fixture", encoding="utf-8")
             path.chmod(0o755)
         gate = target / "usr/libexec/rauc/edgeguard-rk-ab-preinstall"
         shutil.copyfile(ROOT / "RK3588_app/edgeguard-rk-ab/edgeguard-rk-ab-preinstall", gate)
@@ -157,6 +163,11 @@ class PackageTests(unittest.TestCase):
             release_tool.check_target(target, self.value)
         shutil.copyfile(PACKAGE / "system.conf", profile)
         gate.write_text("replaced", encoding="utf-8")
+        with self.assertRaises(ValueError):
+            release_tool.check_target(target, self.value)
+        shutil.copyfile(ROOT / "RK3588_app/edgeguard-rk-ab/edgeguard-rk-ab-preinstall", gate)
+        backend = target / "usr/libexec/rauc/edgeguard-rk-ab-backend"
+        backend.write_bytes(b"#!/bin/sh\r\nexit 0\r\n")
         with self.assertRaises(ValueError):
             release_tool.check_target(target, self.value)
 

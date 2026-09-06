@@ -49,7 +49,9 @@ int main(int argc, char **argv)
     }
     if (argc == 4 && !strcmp(argv[1], "info") &&
         !strcmp(argv[2], "--output-format=shell") && argv[3][0] == '/') {
-        emit(argv[0], "info", "RAUC_MF_COMPATIBLE='EdgeGuard-ATK-DLRK3588-RK3588'\n");
+        emit(argv[0], "info",
+             "RAUC_MF_COMPATIBLE='EdgeGuard-ATK-DLRK3588-RK3588'\n"
+             "RAUC_MF_VERSION='1.2.0'\nRAUC_MF_BUILD='candidate'\n");
         return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "install") && argv[2][0] == '/')

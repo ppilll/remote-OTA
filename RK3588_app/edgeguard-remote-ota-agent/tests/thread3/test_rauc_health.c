@@ -31,7 +31,8 @@ static gboolean fake_run(void *user, const char *const argv[], uint32_t timeout,
 static OtaRaucAdapter adapter_for(Fake *fake)
 {
     *fake = (Fake){g_ptr_array_new_with_free_func((GDestroyNotify)g_strfreev),
-        "RAUC_MF_COMPATIBLE='EdgeGuard-ATK-DLRK3588-RK3588'\n", "a\n", NULL, 0};
+        "RAUC_MF_COMPATIBLE='EdgeGuard-ATK-DLRK3588-RK3588'\n"
+        "RAUC_MF_VERSION='1.2.0'\nRAUC_MF_BUILD='candidate'\n", "a\n", NULL, 0};
     OtaRaucAdapter adapter;
     ota_rauc_adapter_init(&adapter); adapter.run = fake_run; adapter.user = fake;
     return adapter;
@@ -47,9 +48,18 @@ static void assert_call(Fake *fake, guint index, const char *const expected[])
 
 static OtaRelease release_identity(void)
 {
-    OtaRelease release = {0};
+    OtaRelease release = {.schema_version=1, .device_compatible="atk-dlrk3588",
+                          .version="1.0.0", .build_id="installed"};
     g_strlcpy(release.rauc_compatible, "EdgeGuard-ATK-DLRK3588-RK3588", sizeof(release.rauc_compatible));
     return release;
+}
+
+static OtaPersistentState attempt_identity(void)
+{
+    OtaPersistentState attempt = {.schema_version=1, .state=OTA_STATE_RAUC_VERIFY,
+        .attempt_id="12345678-1234-4123-8123-123456789abc",
+        .target_version="1.2.0", .build_id="candidate"};
+    return attempt;
 }
 
 static void argv_and_failures(void)
@@ -57,9 +67,10 @@ static void argv_and_failures(void)
     Fake fake;
     OtaRaucAdapter adapter = adapter_for(&fake);
     OtaRelease release = release_identity();
+    OtaPersistentState attempt = attempt_identity();
     OtaError error = {0};
     const char *bundle = "/tmp/bundle $(touch sentinel); ' quoted.raucb";
-    g_assert_true(ota_rauc_verify(&adapter, bundle, &release, &error));
+    g_assert_true(ota_rauc_verify(&adapter, bundle, &release, &attempt, &error));
     const char *info[] = {"/usr/bin/rauc", "info", "--output-format=shell", bundle, NULL};
     assert_call(&fake, 0, info);
     g_assert_true(ota_rauc_install(&adapter, bundle, &error));
@@ -72,11 +83,11 @@ static void argv_and_failures(void)
     g_assert_cmpuint(fake.calls->len, ==, before + 1);
     g_assert_cmpuint(fake.timeout, ==, adapter.install_timeout_ms);
     fake.fail = "info";
-    g_assert_false(ota_rauc_verify(&adapter, bundle, &release, &error));
+    g_assert_false(ota_rauc_verify(&adapter, bundle, &release, &attempt, &error));
     g_assert_cmpint(error.code, ==, OTA_ERROR_RAUC_VERIFY_FAILED);
     before = fake.calls->len;
     g_assert_false(ota_rauc_install(&adapter, "--anything", &error));
-    g_assert_false(ota_rauc_verify(&adapter, "relative.raucb", &release, &error));
+    g_assert_false(ota_rauc_verify(&adapter, "relative.raucb", &release, &attempt, &error));
     g_assert_cmpuint(fake.calls->len, ==, before);
     fake.fail = NULL;
     g_assert_true(ota_rauc_status(&adapter, &error));
@@ -93,6 +104,7 @@ static void info_parser(void)
     Fake fake;
     OtaRaucAdapter adapter = adapter_for(&fake);
     OtaRelease release = release_identity();
+    OtaPersistentState attempt = attempt_identity();
     OtaError error = {0};
     const char *invalid[] = {
         "", "RAUC_MF_VERSION='1.0.0'\n", "RAUC_MF_COMPATIBLE=''\n",
@@ -100,25 +112,41 @@ static void info_parser(void)
         "RAUC_MF_COMPATIBLE='unterminated\n", "RAUC_MF_COMPATIBLE='x' garbage\n",
         "RAUC_MF_COMPATIBLE='x'; touch sentinel\n",
         "RAUC_MF_COMPATIBLE='x'\nRAUC_MF_COMPATIBLE='x'\n",
-        "RAUC_MF_COMPATIBLE='x'\\'", "RAUC_MF_COMPATIBLE='a\rb'\n"
+        "RAUC_MF_COMPATIBLE='x'\\'", "RAUC_MF_COMPATIBLE='a\rb'\n",
+        "RAUC_MF_COMPATIBLE='EdgeGuard-ATK-DLRK3588-RK3588'\n"
+        "RAUC_MF_VERSION=unquoted\nRAUC_MF_BUILD='candidate'\n",
+        "RAUC_MF_COMPATIBLE='EdgeGuard-ATK-DLRK3588-RK3588'\n"
+        "RAUC_MF_VERSION='1.2.0'\nRAUC_MF_VERSION='1.2.0'\nRAUC_MF_BUILD='candidate'\n",
+        "RAUC_MF_COMPATIBLE='EdgeGuard-ATK-DLRK3588-RK3588'\n"
+        "RAUC_MF_VERSION='1.2.0'\nRAUC_MF_BUILD='candidate'\nRAUC_MF_BUILD='candidate'\n"
     };
     for (gsize i = 0; i < G_N_ELEMENTS(invalid); ++i) {
         fake.info = invalid[i];
-        g_assert_false(ota_rauc_verify(&adapter, "/bundle", &release, &error));
+        g_assert_false(ota_rauc_verify(&adapter, "/bundle", &release, &attempt, &error));
         g_assert_cmpint(error.code, ==, OTA_ERROR_RAUC_VERIFY_FAILED);
     }
-    fake.info = "RAUC_MF_COMPATIBLE='wrong'\n";
-    g_assert_false(ota_rauc_verify(&adapter, "/bundle", &release, &error));
+    fake.info = "RAUC_MF_COMPATIBLE='wrong'\nRAUC_MF_VERSION='1.2.0'\nRAUC_MF_BUILD='candidate'\n";
+    g_assert_false(ota_rauc_verify(&adapter, "/bundle", &release, &attempt, &error));
     g_assert_cmpint(error.code, ==, OTA_ERROR_RAUC_COMPAT_MISMATCH);
-    fake.info = "RAUC_MF_COMPATIBLE='x'\\''y'\nFUTURE=$(touch sentinel)\n";
+    fake.info = "RAUC_MF_COMPATIBLE='x'\\''y'\nRAUC_MF_VERSION='1.2.0'\n"
+                "RAUC_MF_BUILD='candidate'\nFUTURE=$(touch sentinel)\n";
     g_strlcpy(release.rauc_compatible, "x'y", sizeof(release.rauc_compatible));
-    g_assert_true(ota_rauc_verify(&adapter, "/bundle", &release, &error));
-    fake.info = "RAUC_MF_COMPATIBLE='$(touch sentinel)'\n";
+    g_assert_true(ota_rauc_verify(&adapter, "/bundle", &release, &attempt, &error));
+    fake.info = "RAUC_MF_COMPATIBLE='$(touch sentinel)'\nRAUC_MF_VERSION='1.2.0'\n"
+                "RAUC_MF_BUILD='candidate'\n";
     g_strlcpy(release.rauc_compatible, "$(touch sentinel)", sizeof(release.rauc_compatible));
-    g_assert_true(ota_rauc_verify(&adapter, "/bundle", &release, &error));
+    g_assert_true(ota_rauc_verify(&adapter, "/bundle", &release, &attempt, &error));
+    fake.info = "RAUC_MF_COMPATIBLE='$(touch sentinel)'\nRAUC_MF_VERSION='9.9.9'\n"
+                "RAUC_MF_BUILD='candidate'\n";
+    g_assert_false(ota_rauc_verify(&adapter, "/bundle", &release, &attempt, &error));
+    g_assert_cmpint(error.code, ==, OTA_ERROR_RAUC_IDENTITY_MISMATCH);
+    fake.info = "RAUC_MF_COMPATIBLE='$(touch sentinel)'\nRAUC_MF_VERSION='1.2.0'\n"
+                "RAUC_MF_BUILD='other'\n";
+    g_assert_false(ota_rauc_verify(&adapter, "/bundle", &release, &attempt, &error));
+    g_assert_cmpint(error.code, ==, OTA_ERROR_RAUC_IDENTITY_MISMATCH);
     release.rauc_compatible[0] = 0;
     guint before = fake.calls->len;
-    g_assert_false(ota_rauc_verify(&adapter, "/bundle", &release, &error));
+    g_assert_false(ota_rauc_verify(&adapter, "/bundle", &release, &attempt, &error));
     g_assert_cmpint(error.code, ==, OTA_ERROR_LOCAL_RELEASE_INVALID);
     g_assert_cmpuint(fake.calls->len, ==, before);
     g_ptr_array_unref(fake.calls);
@@ -230,8 +258,10 @@ static void real_runner(void)
     OtaRaucAdapter adapter;
     ota_rauc_adapter_init(&adapter); adapter.binary = binary; adapter.abctl = binary;
     OtaRelease release = release_identity();
+    OtaPersistentState attempt = attempt_identity();
     OtaError error = {0};
-    g_assert_true(ota_rauc_verify(&adapter, "/tmp/$(touch sentinel).raucb", &release, &error));
+    g_assert_true(ota_rauc_verify(&adapter, "/tmp/$(touch sentinel).raucb", &release,
+                                  &attempt, &error));
     g_assert_true(ota_rauc_mark_good(&adapter, OTA_SLOT_A, &error));
     sidecar_set(binary, ".mode", "install-fail");
     g_assert_false(ota_rauc_install(&adapter, "/bundle", &error));

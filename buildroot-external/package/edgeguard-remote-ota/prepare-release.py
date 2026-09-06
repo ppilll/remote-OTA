@@ -96,6 +96,12 @@ def check_target(target, expected=None):
         path = target / relative
         if not path.is_file() or not path.stat().st_mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH):
             raise ValueError("missing executable: " + relative)
+    for relative in ("usr/libexec/rauc/edgeguard-rk-ab-backend",
+                     "usr/libexec/rauc/edgeguard-rk-ab-preinstall",
+                     "etc/init.d/S99edgeguard-remote-ota"):
+        data = (target / relative).read_bytes()
+        if not data.startswith(b"#!/bin/sh\n") or b"\r" in data:
+            raise ValueError("invalid LF shebang/text bytes: " + relative)
     for relative in ("etc/rauc/keyring.pem", "etc/edgeguard-ota/agent.conf"):
         path = target / relative
         if not path.is_file() or not path.stat().st_size:

@@ -240,6 +240,20 @@ static void local_partials(void)
     dir=temp_config(&c,NULL); g_assert_cmpint(mkfifo(c.part_file,0600),==,0);
     g_assert_false(ota_download_bundle(&c,&m,NULL,&e)); assert_file(c.bundle_file,"previous"); cleanup(dir,&c);
 }
+static void completed_bundle_reuse(void)
+{
+    OtaConfig c;
+    char *dir = temp_config(&c, NULL);
+    OtaManifest m = manifest();
+    OtaError e = {0};
+    gboolean retry = TRUE;
+    g_assert_true(g_file_set_contents(c.bundle_file, "abc", 3, NULL));
+    g_assert_true(ota_download_bundle(&c, &m, &retry, &e));
+    g_assert_false(retry);
+    assert_file(c.bundle_file, "abc");
+    g_assert_false(g_file_test(c.part_file, G_FILE_TEST_EXISTS));
+    cleanup(dir, &c);
+}
 static void manifest_http(void)
 {
     const char *json="{\"schema_version\":1,\"device_compatible\":\"atk-dlrk3588\",\"version\":\"1.2.3\",\"build_id\":\"test\",\"artifact_url\":\"/update.raucb\",\"size\":3,\"mandatory\":false,\"sha256\":\"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad\"}";
@@ -280,6 +294,7 @@ int main(int argc,char **argv)
     g_test_add_func("/thread2/http/download",downloads);
     g_test_add_func("/thread2/http/resume-across-calls",resume_across_calls);
     g_test_add_func("/thread2/http/local-partials",local_partials);
+    g_test_add_func("/thread2/http/completed-bundle-reuse",completed_bundle_reuse);
     g_test_add_func("/thread2/http/manifest",manifest_http);
     g_test_add_func("/thread2/http/report",report_http);
     return g_test_run();

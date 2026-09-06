@@ -12,7 +12,15 @@ fail()
     exit 1
 }
 
-[ "$#" -eq 0 ] || fail "unexpected arguments"
+# RAUC 1.5.1 invokes a system handler with one empty argument. Keep zero argv
+# only for explicit/manual smoke invocation and reject every other shape.
+if [ "$#" -eq 0 ]; then
+    :
+elif [ "$#" -eq 1 ] && [ -z "$1" ]; then
+    :
+else
+    fail "unexpected arguments"
+fi
 # Sentinel preserves trailing newlines so ambiguous output cannot be normalized.
 current=$("$ABCTL" get-current && printf '.') || fail "current-slot identity failed"
 case "$current" in

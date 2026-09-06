@@ -166,28 +166,6 @@ static gboolean clean_text(const char *s, gsize cap)
         if (*p<0x20 || *p==0x7f) return FALSE;
     return TRUE;
 }
-gboolean ota_artifact_path_valid(const char *path)
-{
-    if (!path || !*path || strlen(path)>=OTA_PATH_CAP || path[0]!='/' || !path[1] || path[1]=='/' ||
-        strstr(path,"..") || strpbrk(path,"\\?#:") || !g_utf8_validate(path,-1,NULL)) return FALSE;
-    /* Decode once to rule out encoded traversal, separators, control bytes and
-     * double encoding. URL syntax remains a path; no authority or query allowed. */
-    GString *decoded=g_string_new(NULL);
-    gboolean ok=TRUE;
-    for (const unsigned char *p=(const unsigned char *)path;*p;++p) {
-        unsigned c=*p;
-        if (c=='%') {
-            if (!p[1] || !p[2] || !g_ascii_isxdigit(p[1]) || !g_ascii_isxdigit(p[2])) { ok=FALSE; break; }
-            c=g_ascii_xdigit_value(p[1])*16+g_ascii_xdigit_value(p[2]); p+=2;
-            if (strchr("/%\\?#:",(int)c)) { ok=FALSE; break; }
-        } else if (c==' ') { ok=FALSE; break; }
-        if (c<0x20 || c==0x7f) { ok=FALSE; break; }
-        g_string_append_c(decoded,(char)c);
-    }
-    if (strstr(decoded->str,"..") || !g_utf8_validate(decoded->str,decoded->len,NULL)) ok=FALSE;
-    g_string_free(decoded,TRUE);
-    return ok;
-}
 gboolean ota_manifest_validate(const OtaManifest *m, OtaError *error)
 {
     OtaVersion v;

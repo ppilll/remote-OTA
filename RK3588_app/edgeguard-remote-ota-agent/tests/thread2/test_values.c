@@ -126,7 +126,7 @@ static void manifest_values(void)
         "/%5chost","/%00x","/%0dx","/%252e%252e/x","/%", "/%GG", "/a b"};
     for(gsize i=0;i<G_N_ELEMENTS(bad);++i) g_assert_false(ota_artifact_path_valid(bad[i]));
     g_assert_true(ota_artifact_path_valid("/releases/update-1.2.3.raucb"));
-    g_assert_true(ota_artifact_path_valid("/releases/update%20file.raucb"));
+    g_assert_false(ota_artifact_path_valid("/releases/update%20file.raucb"));
     m.sha256[0]='A'; g_assert_false(ota_manifest_validate(&m,NULL));
     m=manifest(); m.sha256[63]=0; g_assert_false(ota_manifest_validate(&m,NULL));
     m=manifest(); memset(m.build_id,'a',sizeof(m.build_id)); g_assert_false(ota_manifest_validate(&m,NULL));

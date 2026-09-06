@@ -1,5 +1,6 @@
 #ifndef EDGEGUARD_OTA_MANIFEST_H
 #define EDGEGUARD_OTA_MANIFEST_H
+#include "artifact.h"
 #include "config.h"
 #include <curl/curl.h>
 
@@ -12,8 +13,6 @@ gboolean ota_manifest_validate(const OtaManifest *manifest, OtaError *error);
 gboolean ota_release_parse(const char *data, gsize length, OtaRelease *out, OtaError *error);
 gboolean ota_release_load(const char *path, OtaRelease *out, OtaError *error);
 gboolean ota_release_validate(const OtaRelease *release, OtaError *error);
-gboolean ota_artifact_path_valid(const char *path);
-
 /* Shared transport plumbing, owned by Thread 2. Config must have passed
  * ota_config_load. No redirects/proxies: keep requests on the configured origin.
  * Caller owns the easy handle. No network-management side effects. */

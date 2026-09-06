@@ -12,14 +12,14 @@ def main():
     compiler = shutil.which(os.environ.get("CC", "cc"))
     pkg = shutil.which("pkg-config")
     if not compiler or not pkg:
-        print("SKIPPED / NOT AVAILABLE: POSIX C compiler and/or pkg-config")
+        print("SKIPPED / NOT HOST VERIFIED: POSIX C compiler and/or pkg-config")
         return 77
     if os.name != "posix":
-        print("SKIPPED / NOT AVAILABLE: POSIX process APIs required")
+        print("SKIPPED / NOT HOST VERIFIED: POSIX process APIs required")
         return 77
     flags = subprocess.run([pkg, "--cflags", "--libs", "glib-2.0"], capture_output=True, text=True)
     if flags.returncode:
-        print("SKIPPED / NOT AVAILABLE: GLib development package")
+        print("SKIPPED / NOT HOST VERIFIED: GLib development package")
         return 77
     root = Path(__file__).resolve().parents[2]
     with tempfile.TemporaryDirectory(prefix="ota-thread3-build-") as temporary:

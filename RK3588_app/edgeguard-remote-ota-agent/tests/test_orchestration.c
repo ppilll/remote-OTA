@@ -1,6 +1,7 @@
 /* Exercise the private skeleton dispatcher with fake services. No HTTP, RAUC,
  * command fixtures or real reboot. The production entrypoint is never called. */
 #define main ota_unused_program_main
+#define OTA_TEST_WEAK_SERVICES 1
 #include "../src/main.c"
 #undef main
 #include <glib/gstdio.h>
@@ -10,7 +11,7 @@ typedef struct {
     OtaStateMachine machine;
     OtaAgentServices services;
     OtaSlot slot;
-    int phase_calls, reboot_calls;
+    int phase_calls, install_calls, reboot_calls;
 } Fixture;
 
 static gboolean fake_slot(void *user, OtaSlot *out, OtaError *error)
@@ -19,29 +20,33 @@ static gboolean fake_slot(void *user, OtaSlot *out, OtaError *error)
     *out = ((Fixture *)user)->slot;
     return TRUE;
 }
-static gboolean fake_phase(void *user, const OtaConfig *config, const OtaRelease *release,
-                            const char *id, const OtaPersistentState *current,
-                            OtaPersistentState *next, OtaError *error)
+static OtaPhaseResult fake_phase(void *user, const OtaConfig *config,
+                                 const OtaRelease *release, const char *id,
+                                 const OtaPersistentState *current,
+                                 OtaPersistentState *next, OtaError *error)
 {
     (void)config; (void)release; (void)id;
     Fixture *f = user;
     ++f->phase_calls;
     if (current->state == OTA_STATE_INSTALLING) {
+        ++f->install_calls;
         ota_error_set(error, OTA_ERROR_RAUC_INSTALL_FAILED, "fake install failure");
-        return FALSE;
+        return OTA_PHASE_HARD_FAILURE;
     }
+    if (current->state == OTA_STATE_ERROR || current->state == OTA_STATE_ROLLBACK)
+        return OTA_PHASE_ADVANCE; /* terminal report succeeds; state is retained */
     if (current->state == OTA_STATE_HEALTH_CHECK) {
         /* Represents successful health-module mark-bad, without running a tool. */
         next->state = OTA_STATE_ROLLBACK;
-        return TRUE;
+        return OTA_PHASE_ADVANCE;
     }
     if (current->state == OTA_STATE_CHECK_UPDATE) {
         next->state = OTA_STATE_IDLE; /* represents HTTP 204 */
         stopping = 1;
-        return TRUE;
+        return OTA_PHASE_ADVANCE;
     }
     g_assert_not_reached();
-    return FALSE;
+    return OTA_PHASE_HARD_FAILURE;
 }
 static gboolean fake_reboot(void *user, OtaError *error)
 {
@@ -107,13 +112,13 @@ static void no_reinstall(Fixture *f, gconstpointer unused)
     (void)unused;
     OtaError error = {0};
     start_at(f, OTA_STATE_INSTALLING);
-    g_assert_cmpint(dispatch(f, &error), ==, 1);
+    g_assert_cmpint(dispatch(f, &error), ==, 2);
     g_assert_cmpint(f->machine.current.state, ==, OTA_STATE_ERROR);
     g_assert_cmpint(error.code, ==, OTA_ERROR_RAUC_INSTALL_FAILED);
-    g_assert_cmpint(f->phase_calls, ==, 1);
+    g_assert_cmpint(f->install_calls, ==, 1);
     g_assert_true(ota_state_machine_open(&f->machine, f->path, NULL, &error));
     g_assert_cmpint(dispatch(f, &error), ==, 2);
-    g_assert_cmpint(f->phase_calls, ==, 1);
+    g_assert_cmpint(f->install_calls, ==, 1);
 }
 static void guard_mark_good(Fixture *f, gconstpointer unused)
 {
@@ -121,7 +126,7 @@ static void guard_mark_good(Fixture *f, gconstpointer unused)
     OtaError error = {0};
     start_at(f, OTA_STATE_MARK_GOOD);
     f->slot = OTA_SLOT_A;
-    g_assert_cmpint(dispatch(f, &error), ==, 1);
+    g_assert_cmpint(dispatch(f, &error), ==, 2);
     g_assert_cmpint(f->phase_calls, ==, 0);
     g_assert_cmpint(f->machine.current.state, ==, OTA_STATE_ERROR);
     g_assert_cmpint(error.code, ==, OTA_ERROR_IDENTITY_AMBIGUOUS);

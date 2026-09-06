@@ -23,17 +23,17 @@ def main():
     if pkg_config is None:
         missing.append("pkg-config")
     if missing:
-        print("SKIPPED / NOT AVAILABLE: " + ", ".join(missing))
+        print("SKIPPED / NOT HOST VERIFIED: " + ", ".join(missing))
         return 77
     packages = ["glib-2.0", "json-glib-1.0"]
     probe = subprocess.run([pkg_config, "--cflags", "--libs", *packages],
                            capture_output=True, text=True, check=False)
     if probe.returncode:
-        print("SKIPPED / NOT AVAILABLE: GLib / JSON-GLib development packages")
+        print("SKIPPED / NOT HOST VERIFIED: GLib / JSON-GLib development packages")
         print(probe.stderr.strip())
         return 77
     sources = [root / "src" / (name + ".c") for name in
-               ("config", "identity", "persistence", "state_machine", "time_source", "reboot")]
+               ("artifact", "config", "identity", "persistence", "state_machine", "time_source", "reboot")]
     flags = ["-std=gnu11", "-Wall", "-Wextra", "-Werror", "-g", "-I", str(root / "include")]
     libraries = shlex.split(probe.stdout)
     with tempfile.TemporaryDirectory(prefix="ota-core-build-") as temporary:
@@ -44,7 +44,7 @@ def main():
         subprocess.run(command, check=True)
         # Also compile/link the skeleton and verify its safe usage-only path.
         skeleton = str(Path(temporary) / "agent-skeleton")
-        subprocess.run([compiler, *flags, str(root / "src/main.c"),
+        subprocess.run([compiler, *flags, "-DOTA_TEST_WEAK_SERVICES", str(root / "src/main.c"),
                         *(str(p) for p in sources), *libraries, "-o", skeleton], check=True)
         usage = subprocess.run([skeleton, "--invalid-option"], capture_output=True, text=True)
         if usage.returncode != 2 or "Usage:" not in usage.stderr:

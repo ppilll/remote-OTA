@@ -4,6 +4,12 @@
 #include "reboot.h"
 #include "time_source.h"
 
+typedef enum {
+    OTA_PHASE_ADVANCE,
+    OTA_PHASE_RETRY,
+    OTA_PHASE_HARD_FAILURE
+} OtaPhaseResult;
+
 typedef struct {
     OtaPersistentState current;
     char path[OTA_PATH_CAP];
@@ -39,13 +45,14 @@ gboolean ota_state_machine_reboot(OtaStateMachine *machine,
 typedef struct {
     void *user;
     gboolean (*load_release)(void *user, const char *path, OtaRelease *out, OtaError *error);
-    gboolean (*phase)(void *user, const OtaConfig *config, const OtaRelease *release,
-                      const char *device_id, const OtaPersistentState *current,
-                      OtaPersistentState *next, OtaError *error);
+    OtaPhaseResult (*phase)(void *user, const OtaConfig *config,
+                           const OtaRelease *release, const char *device_id,
+                           const OtaPersistentState *current,
+                           OtaPersistentState *next, OtaError *error);
     OtaCurrentSlot current_slot;
     OtaRebootOps reboot;
     OtaTimeSource time;
 } OtaAgentServices;
-/* main.c provides a fail-closed weak default. Merged adapter overrides this symbol. */
+/* Strong production definition is in services.c. Omitting it must fail to link. */
 gboolean ota_agent_services_init(OtaAgentServices *services, OtaError *error);
 #endif

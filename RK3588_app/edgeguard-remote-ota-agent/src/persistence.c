@@ -1,4 +1,5 @@
 #include "edgeguard_ota/persistence.h"
+#include "edgeguard_ota/artifact.h"
 #include "edgeguard_ota/identity.h"
 #include <json-glib/json-glib.h>
 #include <errno.h>
@@ -171,13 +172,6 @@ static gboolean persisted_version_valid(const char *text)
     return *text == 0;
 }
 
-static gboolean artifact_valid(const char *text)
-{
-    if (*text != '/' || !text[1] || text[1] == '/' || strstr(text, "..") ||
-        strpbrk(text, "\\%:#? ")) return FALSE;
-    return TRUE;
-}
-
 gboolean ota_persistent_state_validate(const OtaPersistentState *s, OtaError *error)
 {
     if (s->schema_version != OTA_SCHEMA_VERSION || !ota_state_name(s->state) ||
@@ -189,7 +183,7 @@ gboolean ota_persistent_state_validate(const OtaPersistentState *s, OtaError *er
     gboolean has_attempt = *s->attempt_id != 0;
     if (has_attempt) {
         if (!ota_uuid_valid(s->attempt_id, TRUE) || !persisted_version_valid(s->target_version) ||
-            !*s->build_id || !artifact_valid(s->artifact_url) || !s->expected_size ||
+            !*s->build_id || !ota_artifact_path_valid(s->artifact_url) || !s->expected_size ||
             s->expected_size > INT64_MAX || strlen(s->expected_sha256) != 64) goto invalid;
         for (const char *p = s->expected_sha256; *p; ++p)
             if (!g_ascii_isdigit(*p) && (*p < 'a' || *p > 'f')) goto invalid;

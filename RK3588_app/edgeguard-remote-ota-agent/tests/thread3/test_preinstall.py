@@ -35,13 +35,13 @@ class PreinstallTests(unittest.TestCase):
     def tearDown(self):
         self.temporary.cleanup()
 
-    def gate(self, current, slots, names, exit_code=0):
+    def gate(self, current, slots, names, exit_code=0, arguments=()):
         env = {key: value for key, value in os.environ.items() if not key.startswith("RAUC_")}
         env.update(TEST_CURRENT=current, TEST_EXIT=str(exit_code))
         if slots is not None:
             env["RAUC_TARGET_SLOTS"] = slots
         env.update({"RAUC_SLOT_NAME_" + key: value for key, value in names.items()})
-        return subprocess.run([SHELL, str(self.script)], env=env, cwd=str(self.directory),
+        return subprocess.run([SHELL, str(self.script), *arguments], env=env, cwd=str(self.directory),
                               capture_output=True, text=True, timeout=5)
 
     def test_opposite_groups_and_order(self):
@@ -50,6 +50,17 @@ class PreinstallTests(unittest.TestCase):
                 result = self.gate(current, slots, {"1": "rootfs." + suffix, "4": "boot." + suffix})
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(result.stdout, "")
+        compatible = self.gate("a\n", "1 4", {"1": "rootfs.1", "4": "boot.1"},
+                               arguments=("",))
+        self.assertEqual(compatible.returncode, 0, compatible.stderr)
+
+    def test_handler_argv_abi(self):
+        inputs = {"1": "rootfs.1", "2": "boot.1"}
+        self.assertEqual(self.gate("a\n", "1 2", inputs).returncode, 0)
+        self.assertEqual(self.gate("a\n", "1 2", inputs, arguments=("",)).returncode, 0)
+        for arguments in (("nonempty",), ("", ""), ("x", "y")):
+            self.assertNotEqual(self.gate("a\n", "1 2", inputs,
+                                          arguments=arguments).returncode, 0)
 
     def test_bad_identity(self):
         for current in ("", "unknown", "A", "a\nb\n", "a\n\n", " a", "a\r\n"):
@@ -75,6 +86,6 @@ class PreinstallTests(unittest.TestCase):
 
 if __name__ == "__main__":
     if not SHELL:
-        print("SKIPPED / NOT AVAILABLE: POSIX shell")
+        print("SKIPPED / NOT HOST VERIFIED: POSIX shell")
         sys.exit(77)
     unittest.main(verbosity=2)

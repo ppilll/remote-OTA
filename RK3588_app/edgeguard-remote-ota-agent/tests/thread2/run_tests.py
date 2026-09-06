@@ -17,16 +17,16 @@ def main():
     compiler = shutil.which(os.environ.get("CC", "cc"))
     pkg = shutil.which("pkg-config")
     if not compiler or not pkg or os.name != "posix":
-        print("SKIPPED / NOT AVAILABLE: POSIX C compiler and pkg-config required")
+        print("SKIPPED / NOT HOST VERIFIED: POSIX C compiler and pkg-config required")
         return 77
     probe = subprocess.run([pkg, "--cflags", "--libs", "glib-2.0", "gthread-2.0",
                             "json-glib-1.0", "libcurl"], capture_output=True, text=True)
     if probe.returncode:
-        print("SKIPPED / NOT AVAILABLE: GLib / JSON-GLib / libcurl development packages")
+        print("SKIPPED / NOT HOST VERIFIED: GLib / JSON-GLib / libcurl development packages")
         print(probe.stderr)
         return 77
     sources = [root / "src" / (name + ".c") for name in
-               ("version", "manifest", "compatibility", "download", "reporting", "time_source")]
+               ("artifact", "version", "manifest", "compatibility", "download", "reporting", "time_source")]
     flags = ["-std=gnu11", "-D_GNU_SOURCE", "-D_FILE_OFFSET_BITS=64",
              "-Wall", "-Wextra", "-Werror", "-g", "-I", str(root / "include")]
     with tempfile.TemporaryDirectory(prefix="ota-thread2-build-") as temporary:

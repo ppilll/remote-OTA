@@ -193,6 +193,108 @@ static gboolean verify(Transfer *t, const char *hash)
  done:
     g_checksum_free(sum); return ok;
 }
+
+static gboolean validate_bundle_path(const char *path, const OtaManifest *m,
+                                     gboolean *missing, OtaError *error)
+{
+    *missing = FALSE;
+    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+    if (fd < 0) {
+        if (errno == ENOENT) { *missing = TRUE; return FALSE; }
+        ota_error_set(error, OTA_ERROR_PERSISTENCE_FAILED,
+                      "Open completed bundle: %s", g_strerror(errno));
+        return FALSE;
+    }
+    struct stat st;
+    gboolean ok = FALSE;
+    if (fstat(fd, &st) < 0 || !S_ISREG(st.st_mode) || st.st_nlink != 1) {
+        ota_error_set(error, OTA_ERROR_PERSISTENCE_FAILED,
+                      "Completed bundle is not a private regular file");
+        goto done;
+    }
+    if (st.st_size < 0 || (uint64_t)st.st_size != m->size) {
+        ota_error_set(error, OTA_ERROR_DOWNLOAD_SIZE_MISMATCH,
+                      "Completed bundle size differs from persisted attempt");
+        goto done;
+    }
+    GChecksum *sum = g_checksum_new(G_CHECKSUM_SHA256);
+    char buffer[65536];
+    uint64_t total = 0;
+    for (;;) {
+        ssize_t n = read(fd, buffer, sizeof(buffer));
+        if (n < 0 && errno == EINTR) continue;
+        if (n < 0) {
+            ota_error_set(error, OTA_ERROR_PERSISTENCE_FAILED,
+                          "Read completed bundle: %s", g_strerror(errno));
+            break;
+        }
+        if (!n) {
+            if (total == m->size && !strcmp(g_checksum_get_string(sum), m->sha256))
+                ok = TRUE;
+            else ota_error_set(error, OTA_ERROR_DOWNLOAD_HASH_MISMATCH,
+                               "Completed bundle hash differs from persisted attempt");
+            break;
+        }
+        total += (uint64_t)n;
+        if (total > m->size) {
+            ota_error_set(error, OTA_ERROR_DOWNLOAD_SIZE_MISMATCH,
+                          "Completed bundle grew during validation");
+            break;
+        }
+        g_checksum_update(sum, (const guchar *)buffer, (gsize)n);
+    }
+    g_checksum_free(sum);
+done:
+    close(fd);
+    return ok;
+}
+
+gboolean ota_download_validate_bundle(const OtaConfig *c, const OtaManifest *m,
+                                      OtaError *error)
+{
+    if (!c || !m || !ota_manifest_validate(m, error) || c->bundle_file[0] != '/') {
+        if (error && error->code == OTA_ERROR_NONE)
+            ota_error_set(error, OTA_ERROR_CONFIG_INVALID, "Invalid completed-bundle validation input");
+        return FALSE;
+    }
+    gboolean missing = FALSE;
+    if (validate_bundle_path(c->bundle_file, m, &missing, error)) return TRUE;
+    if (missing) ota_error_set(error, OTA_ERROR_DOWNLOAD_SIZE_MISMATCH,
+                               "Completed bundle is absent");
+    return FALSE;
+}
+
+gboolean ota_download_discard_partial(const OtaConfig *c, OtaError *error)
+{
+    if (!c || c->part_file[0] != '/') {
+        ota_error_set(error, OTA_ERROR_CONFIG_INVALID, "Invalid partial path");
+        return FALSE;
+    }
+    struct stat st;
+    if (lstat(c->part_file, &st) < 0) {
+        if (errno == ENOENT) return TRUE;
+        ota_error_set(error, OTA_ERROR_PERSISTENCE_FAILED,
+                      "Inspect stale partial: %s", g_strerror(errno));
+        return FALSE;
+    }
+    if (!S_ISREG(st.st_mode) || st.st_nlink != 1) {
+        ota_error_set(error, OTA_ERROR_PERSISTENCE_FAILED,
+                      "Stale partial is not a private regular file");
+        return FALSE;
+    }
+    char *parent = g_path_get_dirname(c->part_file);
+    int dir = open(parent, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    g_free(parent);
+    if (dir < 0 || unlink(c->part_file) < 0 || fsync(dir) < 0) {
+        if (dir >= 0) close(dir);
+        ota_error_set(error, OTA_ERROR_PERSISTENCE_FAILED,
+                      "Durably discard stale partial: %s", g_strerror(errno));
+        return FALSE;
+    }
+    close(dir);
+    return TRUE;
+}
+
 static gboolean publish(Transfer *t, const char *part, const char *bundle)
 {
     char *parent=g_path_get_dirname(bundle);
@@ -222,6 +324,17 @@ gboolean ota_download_bundle(const OtaConfig *c, const OtaManifest *m, gboolean 
     char *a=g_path_get_dirname(c->part_file), *b=g_path_get_dirname(c->bundle_file);
     gboolean same_parent=!strcmp(a,b); g_free(a); g_free(b);
     if (!same_parent) { ota_error_set(error,OTA_ERROR_CONFIG_INVALID,"Download files must share one directory"); return FALSE; }
+    gboolean final_missing = FALSE;
+    OtaError final_error = {0};
+    if (validate_bundle_path(c->bundle_file, m, &final_missing, &final_error)) {
+        if (!ota_download_discard_partial(c, error)) return FALSE;
+        return TRUE;
+    }
+    if (!final_missing && final_error.code != OTA_ERROR_DOWNLOAD_SIZE_MISMATCH &&
+        final_error.code != OTA_ERROR_DOWNLOAD_HASH_MISMATCH) {
+        if (error) *error = final_error;
+        return FALSE;
+    }
     Transfer t={.fd=-1,.expected=m->size}; gboolean ok=FALSE;
     t.fd=open(c->part_file,O_RDWR|O_CREAT|O_CLOEXEC|O_NOFOLLOW|O_NONBLOCK,0600);
     struct stat st;

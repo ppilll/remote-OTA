@@ -13,7 +13,6 @@ config BR2_PACKAGE_EDGEGUARD_REMOTE_OTA
 	  GNU11 EdgeGuard remote OTA Agent, RAUC pre-install safety gate,
 	  static symmetric RAUC profile and BusyBox/SysV startup integration.
 	  Requires provisioned /etc/rauc/keyring.pem and persistent /userdata.
-	  Service callback binding from the merged Agent is required to operate.
 
 if BR2_PACKAGE_EDGEGUARD_REMOTE_OTA
 

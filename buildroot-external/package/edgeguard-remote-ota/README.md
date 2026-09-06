@@ -1,8 +1,8 @@
 # R3-F Thread 3 package integration
 
 Evidence level: CODEX VERIFIED. These are local-package files, not a completed
-Buildroot/SDK or board validation. Current main.c has a weak fail-closed
-ota_agent_services_init; merged phase/service bindings remain an integration task.
+Buildroot/SDK or board validation. The production link includes the strong merged
+service binder; omitting services.c is a link error.
 
 This mirrors edgeguard-rk-ab: SITE_METHOD=local, TARGET_CC, GNU11, generic-package
 and explicit target installs. external.mk already discovers every package/*.mk.
@@ -52,7 +52,8 @@ force-kills or restarts RAUC. BusyBox background startup may discard Agent stder
 run the Agent foreground during integration to inspect typed diagnostics. There is
 no automatic respawn/reinstall. Initial liveness is not candidate health acceptance.
 
-The adapter uses 30-second query and one-hour install deadlines by default. Health
+The bundle HTTP request default is 600 seconds and still uses typed retry/resume;
+the adapter uses 30-second query and one-hour install deadlines by default. Health
 uses its configured timeout per external command, including the optional argv[0]
 hook. A CLI timeout/failure may leave service-side install outcome uncertain; the
 orchestrator must enter ERROR, never retry the same attempt or restart RAUC.
@@ -61,8 +62,8 @@ get-current. Health itself never marks, persists or reboots. After unhealthy,
 the caller may use guarded mark-bad, persist ROLLBACK only on success, then reboot
 through Thread 1. An identity ambiguity blocks both mark operations.
 
-Remaining R3-G work includes actual compiler/library compatibility, merged service
-binding, vendor Buildroot/Kconfig and pkg-config sysroot behavior, BusyBox options,
+Remaining R3-G work includes actual compiler/library compatibility, vendor
+Buildroot/Kconfig and pkg-config sysroot behavior, BusyBox options,
 post-build registration, service ordering and keyring provisioning. Actual RAUC
 1.5.1 environment/output behavior, RK3588 slot safety and reboot outcomes require
 the later real integration stages. Fakes do not establish these results.

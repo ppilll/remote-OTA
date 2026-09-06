@@ -177,63 +177,106 @@ gboolean ota_rauc_current_slot(const OtaRaucAdapter *adapter, OtaSlot *slot, Ota
     *slot = current; return TRUE;
 }
 
-/* RAUC 1.5.1 emits g_shell_quote strings. Decode only single quoted segments
- * plus the apostrophe escape between segments. No expansion, eval or execution.
- * Unknown assignment lines are ignored as data, even if their values look like code. */
-static char *compatible_value(const char *output)
+/* RAUC 1.5.1 emits g_shell_quote strings. Decode only single-quoted segments
+ * plus the apostrophe escape between segments. No expansion or execution. */
+static char *quoted_value(const char *text)
+{
+    const char *p = text;
+    GString *decoded = g_string_new(NULL);
+    gboolean valid = TRUE;
+    while (*p) {
+        if (*p++ != '\'') { valid = FALSE; break; }
+        while (*p && *p != '\'') {
+            if ((unsigned char)*p < 0x20 || *p == 0x7f) { valid = FALSE; break; }
+            g_string_append_c(decoded, *p++);
+        }
+        if (!valid || *p != '\'') { valid = FALSE; break; }
+        ++p;
+        if (p[0] == '\\' && p[1] == '\'') {
+            g_string_append_c(decoded, '\''); p += 2;
+            if (*p != '\'') { valid = FALSE; break; }
+        } else if (*p) { valid = FALSE; break; }
+    }
+    if (!decoded->len || decoded->len >= OTA_TEXT_CAP ||
+        !g_utf8_validate(decoded->str, -1, NULL)) valid = FALSE;
+    if (!valid) { g_string_free(decoded, TRUE); return NULL; }
+    return g_string_free(decoded, FALSE);
+}
+
+typedef struct { char *compatible, *version, *build; } BundleIdentity;
+
+static gboolean identity_value(char **destination, const char *line,
+                               const char *key)
+{
+    gsize length = strlen(key);
+    if (strncmp(line, key, length) || line[length] != '=') return TRUE;
+    if (*destination) return FALSE;
+    *destination = quoted_value(line + length + 1);
+    return *destination != NULL;
+}
+
+static gboolean bundle_identity_parse(const char *output, BundleIdentity *identity)
 {
     char **lines = g_strsplit(output, "\n", -1);
-    char *value = NULL;
-    gboolean seen = FALSE, valid = TRUE;
-    for (gsize i = 0; lines[i]; ++i) {
-        if (!g_str_has_prefix(lines[i], "RAUC_MF_COMPATIBLE=")) continue;
-        if (seen) { valid = FALSE; break; }
-        seen = TRUE;
-        const char *p = lines[i] + strlen("RAUC_MF_COMPATIBLE=");
-        GString *decoded = g_string_new(NULL);
-        while (*p) {
-            if (*p++ != '\'') { valid = FALSE; break; }
-            while (*p && *p != '\'') {
-                if ((unsigned char)*p < 0x20 || *p == 0x7f) { valid = FALSE; break; }
-                g_string_append_c(decoded, *p++);
-            }
-            if (!valid || *p != '\'') { valid = FALSE; break; }
-            ++p;
-            if (p[0] == '\\' && p[1] == '\'') {
-                g_string_append_c(decoded, '\''); p += 2;
-                if (*p != '\'') { valid = FALSE; break; }
-            }
-            else if (*p) { valid = FALSE; break; }
-        }
-        if (!decoded->len || decoded->len >= OTA_TEXT_CAP || !g_utf8_validate(decoded->str, -1, NULL)) valid = FALSE;
-        value = g_string_free(decoded, FALSE);
+    gboolean valid = TRUE;
+    for (gsize i = 0; lines[i] && valid; ++i) {
+        valid = identity_value(&identity->compatible, lines[i], "RAUC_MF_COMPATIBLE") &&
+                identity_value(&identity->version, lines[i], "RAUC_MF_VERSION") &&
+                identity_value(&identity->build, lines[i], "RAUC_MF_BUILD");
     }
     g_strfreev(lines);
-    if (!valid || !seen) g_clear_pointer(&value, g_free);
-    return value;
+    return valid && identity->compatible && identity->version && identity->build;
+}
+
+static void bundle_identity_clear(BundleIdentity *identity)
+{
+    g_free(identity->compatible);
+    g_free(identity->version);
+    g_free(identity->build);
 }
 
 gboolean ota_rauc_verify(const OtaRaucAdapter *adapter, const char *bundle,
-                          const OtaRelease *release, OtaError *error)
+                         const OtaRelease *release,
+                         const OtaPersistentState *attempt, OtaError *error)
 {
     if (!release || !release->rauc_compatible[0] ||
         !memchr(release->rauc_compatible, 0, sizeof(release->rauc_compatible))) {
-        ota_error_set(error, OTA_ERROR_LOCAL_RELEASE_INVALID, "Missing local RAUC compatible"); return FALSE;
+        ota_error_set(error, OTA_ERROR_LOCAL_RELEASE_INVALID,
+                      "Missing local RAUC compatible");
+        return FALSE;
+    }
+    if (!attempt || !attempt->attempt_id[0] || !attempt->target_version[0] ||
+        !attempt->build_id[0] ||
+        !memchr(attempt->target_version, 0, sizeof(attempt->target_version)) ||
+        !memchr(attempt->build_id, 0, sizeof(attempt->build_id))) {
+        ota_error_set(error, OTA_ERROR_RAUC_IDENTITY_MISMATCH,
+                      "Missing persisted candidate identity");
+        return FALSE;
     }
     if (!bundle_path(bundle, OTA_ERROR_RAUC_VERIFY_FAILED, error)) return FALSE;
     const char *argv[] = {adapter ? adapter->binary : NULL, "info", "--output-format=shell", bundle, NULL};
     char *output;
     if (!invoke(adapter, argv, adapter ? adapter->query_timeout_ms : 0,
                 OTA_ERROR_RAUC_VERIFY_FAILED, &output, error)) return FALSE;
-    char *compatible = compatible_value(output);
+    BundleIdentity identity = {0};
+    gboolean parsed = bundle_identity_parse(output, &identity);
     g_free(output);
-    if (!compatible) {
-        ota_error_set(error, OTA_ERROR_RAUC_VERIFY_FAILED, "Missing, duplicate or malformed RAUC_MF_COMPATIBLE");
+    if (!parsed) {
+        bundle_identity_clear(&identity);
+        ota_error_set(error, OTA_ERROR_RAUC_VERIFY_FAILED,
+                      "Missing, duplicate or malformed required RAUC identity assignment");
         return FALSE;
     }
-    gboolean ok = !strcmp(compatible, release->rauc_compatible);
-    g_free(compatible);
-    if (!ok) ota_error_set(error, OTA_ERROR_RAUC_COMPAT_MISMATCH, "Bundle and local RAUC compatible differ");
+    gboolean ok = !strcmp(release->rauc_compatible, identity.compatible);
+    if (!ok) ota_error_set(error, OTA_ERROR_RAUC_COMPAT_MISMATCH,
+                           "Bundle and local RAUC compatible differ");
+    if (ok && (strcmp(identity.version, attempt->target_version) ||
+               strcmp(identity.build, attempt->build_id))) {
+        ota_error_set(error, OTA_ERROR_RAUC_IDENTITY_MISMATCH,
+                      "Signed bundle version/build differs from persisted attempt");
+        ok = FALSE;
+    }
+    bundle_identity_clear(&identity);
     return ok;
 }
 

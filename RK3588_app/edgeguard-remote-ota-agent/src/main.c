@@ -11,6 +11,7 @@
 static volatile sig_atomic_t stopping;
 static void stop_requested(int signal_number) { (void)signal_number; stopping = 1; }
 
+#ifdef OTA_TEST_WEAK_SERVICES
 __attribute__((weak))
 gboolean ota_agent_services_init(OtaAgentServices *services, OtaError *error)
 {
@@ -19,6 +20,7 @@ gboolean ota_agent_services_init(OtaAgentServices *services, OtaError *error)
                   "Thread 2/3 service adapter is not linked; orchestration unavailable");
     return FALSE;
 }
+#endif
 
 static int acquire_lock(const char *directory, OtaError *error)
 {
@@ -51,6 +53,14 @@ static gboolean poll_wait(const OtaTimeSource *time, uint32_t seconds, OtaError 
     return TRUE;
 }
 
+static gboolean phase_may_retry(OtaState state)
+{
+    return state == OTA_STATE_CHECK_UPDATE || state == OTA_STATE_DOWNLOADING ||
+           state == OTA_STATE_VERIFY_DOWNLOAD || state == OTA_STATE_RAUC_VERIFY ||
+           state == OTA_STATE_REPORT_SUCCESS || state == OTA_STATE_ERROR ||
+           state == OTA_STATE_ROLLBACK;
+}
+
 /* This skeleton owns ordering and durability. Service callbacks own the frozen
  * HTTP/version/download/RAUC/health/report operations, with typed results. */
 static int run(OtaStateMachine *machine, const OtaConfig *config,
@@ -60,7 +70,6 @@ static int run(OtaStateMachine *machine, const OtaConfig *config,
     gboolean first_poll = TRUE;
     while (!stopping) {
         OtaState state = machine->current.state;
-        if (state == OTA_STATE_ERROR || state == OTA_STATE_ROLLBACK) return 2;
         if (state == OTA_STATE_REBOOT_PENDING)
             return ota_state_machine_reboot(machine, &services->reboot, error) ? 0 : 1;
         OtaPersistentState next = machine->current;
@@ -71,6 +80,7 @@ static int run(OtaStateMachine *machine, const OtaConfig *config,
             next.state = OTA_STATE_CHECK_NETWORK;
         } else {
             OtaError phase_error = {0};
+            gboolean terminal = state == OTA_STATE_ERROR || state == OTA_STATE_ROLLBACK;
             if (state == OTA_STATE_MARK_GOOD) {
                 OtaSlot current = OTA_SLOT_UNKNOWN;
                 if (!services->current_slot(services->user, &current, &phase_error) ||
@@ -78,17 +88,43 @@ static int run(OtaStateMachine *machine, const OtaConfig *config,
                     ota_error_set(&phase_error, OTA_ERROR_IDENTITY_AMBIGUOUS,
                                   "Current slot is not the expected candidate before mark-good");
                     if (!ota_state_machine_fail(machine, phase_error.code, phase_error.message, error)) return 1;
-                    *error = phase_error;
-                    return 1;
+                    continue;
                 }
             }
-            if (!services->phase(services->user, config, release, device_id,
-                                  &machine->current, &next, &phase_error)) {
+            OtaPhaseResult phase_result = services->phase(services->user, config, release,
+                                                          device_id, &machine->current,
+                                                          &next, &phase_error);
+            if (phase_result == OTA_PHASE_RETRY) {
+                if (!phase_may_retry(state)) {
+                    ota_error_set(&phase_error, OTA_ERROR_ILLEGAL_TRANSITION,
+                                  "State %s is not replay-safe", ota_state_name(state));
+                    phase_result = OTA_PHASE_HARD_FAILURE;
+                } else {
+                    if (!poll_wait(&services->time, config->poll_interval_sec, error)) return 1;
+                    continue;
+                }
+            }
+            if (phase_result != OTA_PHASE_ADVANCE) {
                 if (phase_error.code == OTA_ERROR_NONE)
                     ota_error_set(&phase_error, OTA_ERROR_ILLEGAL_TRANSITION, "Phase failed without a typed error");
+                if (terminal) {
+                    /* Reporting cannot mutate or replace the durable OTA cause. */
+                    if (machine->current.last_error.code != OTA_ERROR_NONE)
+                        *error = machine->current.last_error;
+                    else *error = phase_error;
+                    return 2;
+                }
+                if (state == OTA_STATE_REPORT_SUCCESS) {
+                    *error = phase_error; /* keep durable report-pending state */
+                    return 1;
+                }
                 if (!ota_state_machine_fail(machine, phase_error.code, phase_error.message, error)) return 1;
-                *error = phase_error;
-                return 1;
+                continue; /* make terminal ERROR reporting reachable */
+            }
+            if (terminal) {
+                if (machine->current.last_error.code != OTA_ERROR_NONE)
+                    *error = machine->current.last_error;
+                return 2; /* telemetry succeeded; terminal OTA state remains */
             }
             if (state == OTA_STATE_CHECK_UPDATE && next.state == OTA_STATE_PRECHECK &&
                 !ota_uuid_kernel(NULL, next.attempt_id, error)) return 1;
@@ -101,8 +137,7 @@ static int run(OtaStateMachine *machine, const OtaConfig *config,
                     ota_error_set(&cause, OTA_ERROR_REBOOT_CONTEXT_INVALID,
                                   "Cannot rigorously capture pre-install slot and boot identity");
                     if (!ota_state_machine_fail(machine, cause.code, cause.message, error)) return 1;
-                    *error = cause;
-                    return 1;
+                    continue;
                 }
                 next.previous_slot = current;
                 next.expected_candidate_slot = current == OTA_SLOT_A ? OTA_SLOT_B : OTA_SLOT_A;
@@ -164,9 +199,16 @@ int main(int argc, char **argv)
         }
         /* Recover a crash between durable mark-bad context and reboot request.
          * Once fallback is observed, never reboot the previous healthy slot. */
-        result = current == machine.current.expected_candidate_slot ?
-                 (ota_state_machine_reboot(&machine, &services.reboot, &error) ? 0 : 1) : 2;
-        goto done;
+        if (current == machine.current.expected_candidate_slot) {
+            result = ota_state_machine_reboot(&machine, &services.reboot, &error) ? 0 : 1;
+            goto done;
+        }
+        if (current != machine.current.previous_slot) {
+            ota_error_set(&error, OTA_ERROR_REBOOT_CONTEXT_INVALID,
+                          "Persisted rollback slot identity is inconsistent");
+            goto done;
+        }
+        /* Previous good slot is already active: report, never reboot it. */
     }
     struct sigaction action = {0};
     action.sa_handler = stop_requested;

@@ -107,11 +107,12 @@ gboolean ota_state_machine_fail(OtaStateMachine *machine, OtaErrorCode code,
     return ota_state_machine_transition(machine, &next, error);
 }
 
-static gboolean recover_error(OtaStateMachine *machine, const char *message, OtaError *error)
+static gboolean recover_error(OtaStateMachine *machine, OtaErrorCode code,
+                              const char *message, OtaError *error)
 {
-    if (!ota_state_machine_fail(machine, OTA_ERROR_REBOOT_CONTEXT_INVALID, message, error)) return FALSE;
-    ota_error_set(error, OTA_ERROR_REBOOT_CONTEXT_INVALID, "%s", message);
-    return FALSE;
+    if (!ota_state_machine_fail(machine, code, message, error)) return FALSE;
+    ota_error_set(error, code, "%s", message);
+    return TRUE; /* recovery completed into durable ERROR; caller may report it */
 }
 
 gboolean ota_state_machine_recover(OtaStateMachine *machine, const char *boot_id_now,
@@ -122,14 +123,28 @@ gboolean ota_state_machine_recover(OtaStateMachine *machine, const char *boot_id
         return FALSE;
     }
     OtaState state = machine->current.state;
-    if (state == OTA_STATE_IDLE || state == OTA_STATE_ERROR || state == OTA_STATE_ROLLBACK) return TRUE;
-    if (state != OTA_STATE_REBOOT_PENDING && state != OTA_STATE_BOOT_NEW_SLOT)
-        return recover_error(machine, "Interrupted phase; automatic replay is disabled", error);
+    if (state == OTA_STATE_IDLE || state == OTA_STATE_ERROR || state == OTA_STATE_ROLLBACK ||
+        state == OTA_STATE_CHECK_NETWORK || state == OTA_STATE_CHECK_UPDATE ||
+        state == OTA_STATE_PRECHECK || state == OTA_STATE_DOWNLOADING ||
+        state == OTA_STATE_VERIFY_DOWNLOAD || state == OTA_STATE_RAUC_VERIFY ||
+        state == OTA_STATE_REPORT_SUCCESS)
+        return TRUE; /* replay-safe work resumes from its durable phase */
+    if (state != OTA_STATE_REBOOT_PENDING && state != OTA_STATE_BOOT_NEW_SLOT) {
+        OtaErrorCode code = state == OTA_STATE_INSTALLING ? OTA_ERROR_RAUC_INSTALL_FAILED :
+                            state == OTA_STATE_MARK_GOOD ? OTA_ERROR_RAUC_MARK_GOOD_FAILED :
+                            state == OTA_STATE_HEALTH_CHECK ? OTA_ERROR_HEALTH_FAILED :
+                            OTA_ERROR_REBOOT_CONTEXT_INVALID;
+        return recover_error(machine, code,
+                             "Interrupted mutating/uncertain phase; automatic replay is disabled",
+                             error);
+    }
     if (!ota_uuid_valid(boot_id_now, TRUE))
-        return recover_error(machine, "Invalid current boot ID", error);
+        return recover_error(machine, OTA_ERROR_REBOOT_CONTEXT_INVALID,
+                             "Invalid current boot ID", error);
     if (!strcmp(boot_id_now, machine->current.boot_id_before)) {
         if (state == OTA_STATE_REBOOT_PENDING) return TRUE; /* persist/retry reboot, never install */
-        return recover_error(machine, "BOOT_NEW_SLOT without a changed boot ID", error);
+        return recover_error(machine, OTA_ERROR_REBOOT_CONTEXT_INVALID,
+                             "BOOT_NEW_SLOT without a changed boot ID", error);
     }
     if (state == OTA_STATE_REBOOT_PENDING) {
         OtaPersistentState next = machine->current;
@@ -139,11 +154,17 @@ gboolean ota_state_machine_recover(OtaStateMachine *machine, const char *boot_id
     OtaSlot slot = OTA_SLOT_UNKNOWN;
     if (!current_slot || !current_slot(user, &slot, error) ||
         (slot != OTA_SLOT_A && slot != OTA_SLOT_B))
-        return recover_error(machine, "Current slot is unavailable or ambiguous", error);
+        return recover_error(machine, OTA_ERROR_REBOOT_CONTEXT_INVALID,
+                             "Current slot is unavailable or ambiguous", error);
     OtaPersistentState next = machine->current;
     if (slot == next.expected_candidate_slot) next.state = OTA_STATE_HEALTH_CHECK;
-    else if (slot == next.previous_slot) next.state = OTA_STATE_ROLLBACK;
-    else return recover_error(machine, "Current slot disagrees with reboot context", error);
+    else if (slot == next.previous_slot) {
+        next.state = OTA_STATE_ROLLBACK;
+        ota_error_set(&next.last_error, OTA_ERROR_HEALTH_FAILED,
+                      "Candidate fell back to the previous known-good slot");
+    }
+    else return recover_error(machine, OTA_ERROR_REBOOT_CONTEXT_INVALID,
+                              "Current slot disagrees with reboot context", error);
     return ota_state_machine_transition(machine, &next, error);
 }
 
@@ -158,7 +179,10 @@ gboolean ota_state_machine_reboot(OtaStateMachine *machine, const OtaRebootOps *
         return TRUE;
     if (failure.code == OTA_ERROR_PERSISTENCE_FAILED) machine->blocked = TRUE;
     else if (failure.code == OTA_ERROR_REBOOT_FAILED) {
-        if (!ota_state_machine_fail(machine, failure.code, failure.message, error)) return FALSE;
+        if (machine->current.last_error.code == OTA_ERROR_NONE) {
+            if (!ota_state_machine_fail(machine, failure.code, failure.message, error)) return FALSE;
+        }
+        /* A secondary reboot request failure must not erase a durable OTA cause. */
     }
     if (error) *error = failure;
     return FALSE;

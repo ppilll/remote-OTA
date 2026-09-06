@@ -18,7 +18,8 @@ define EDGEGUARD_REMOTE_OTA_BUILD_CMDS
 	$(TARGET_CC) $(TARGET_CFLAGS) -std=gnu11 -Wall -Wextra \
 		-I$(@D)/include \
 		`$(EDGEGUARD_REMOTE_OTA_PKG_CONFIG) --cflags glib-2.0 json-glib-1.0 libcurl` \
-		$(@D)/src/main.c $(@D)/src/config.c $(@D)/src/identity.c \
+		$(@D)/src/main.c $(@D)/src/services.c $(@D)/src/artifact.c \
+		$(@D)/src/config.c $(@D)/src/identity.c \
 		$(@D)/src/manifest.c $(@D)/src/version.c $(@D)/src/compatibility.c \
 		$(@D)/src/download.c $(@D)/src/persistence.c $(@D)/src/rauc_adapter.c \
 		$(@D)/src/state_machine.c $(@D)/src/reporting.c $(@D)/src/time_source.c \

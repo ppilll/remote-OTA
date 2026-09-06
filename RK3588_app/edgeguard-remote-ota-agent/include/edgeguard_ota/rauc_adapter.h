@@ -21,7 +21,8 @@ gboolean ota_command_run(void *user, const char *const argv[], uint32_t timeout_
                          char **output, GError **error);
 gboolean ota_rauc_current_slot(const OtaRaucAdapter *adapter, OtaSlot *slot, OtaError *error);
 gboolean ota_rauc_verify(const OtaRaucAdapter *adapter, const char *bundle,
-                          const OtaRelease *release, OtaError *error);
+                         const OtaRelease *release,
+                         const OtaPersistentState *attempt, OtaError *error);
 /* Exactly one invocation. Failure is RAUC_INSTALL_FAILED; no retry/restart. */
 gboolean ota_rauc_install(const OtaRaucAdapter *adapter, const char *bundle, OtaError *error);
 gboolean ota_rauc_status(const OtaRaucAdapter *adapter, OtaError *error);
