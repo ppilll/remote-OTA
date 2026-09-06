@@ -1,5 +1,6 @@
 menu "EdgeGuard"
 
 source "$BR2_EXTERNAL_EDGEGUARD_PATH/package/edgeguard-rk-ab/Config.in"
+source "$BR2_EXTERNAL_EDGEGUARD_PATH/package/edgeguard-remote-ota/Config.in"
 
 endmenu

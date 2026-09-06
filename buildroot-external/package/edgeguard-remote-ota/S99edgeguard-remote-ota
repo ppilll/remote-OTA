@@ -1,0 +1,61 @@
+#!/bin/sh
+# BusyBox/SysV. RAUC/D-Bus and userdata mounting belong to earlier services.
+DAEMON=/usr/bin/edgeguard-remote-ota-agent
+CONFIG=/etc/edgeguard-ota/agent.conf
+PIDFILE=/var/run/edgeguard-remote-ota.pid
+PATH=/sbin:/usr/sbin:/bin:/usr/bin
+export PATH
+umask 077
+
+running()
+{
+    start-stop-daemon -K -t -q -p "$PIDFILE" -x "$DAEMON"
+}
+
+start()
+{
+    if running; then return 0; fi
+    [ -x "$DAEMON" ] && [ -r "$CONFIG" ] &&
+        [ -r /etc/edgeguard-ota/release.json ] || return 1
+    # Avoid putting Agent state on the underlying rootfs before userdata mounts.
+    mounted=0
+    while read -r device mountpoint fstype options dump pass; do
+        if [ "$mountpoint" = /userdata ]; then mounted=1; fi
+    done < /proc/mounts
+    [ "$mounted" -eq 1 ] && [ -w /userdata ] || {
+        echo 'edgeguard-remote-ota: persistent /userdata is unavailable' >&2
+        return 1
+    }
+    mkdir -p /userdata/edgeguard-remote-ota || return 1
+    chmod 0700 /userdata/edgeguard-remote-ota || return 1
+    start-stop-daemon -S -q -b -m -p "$PIDFILE" -x "$DAEMON" -- --config "$CONFIG" || return 1
+    # Catch immediate configuration/service-binding failure. This is process
+    # liveness only, never OTA health acceptance or a restart loop.
+    sleep 1
+    running
+}
+
+stop()
+{
+    if ! running; then return 0; fi
+    start-stop-daemon -K -q -p "$PIDFILE" -x "$DAEMON" -s TERM || return 1
+    remaining=35
+    while running && [ "$remaining" -gt 0 ]; do
+        sleep 1
+        remaining=$((remaining - 1))
+    done
+    # Never force-kill an installation or touch the RAUC service.
+    if running; then
+        echo 'edgeguard-remote-ota: still stopping; no forced kill performed' >&2
+        return 1
+    fi
+    rm -f "$PIDFILE"
+}
+
+case "${1-}" in
+    start) start ;;
+    stop) stop ;;
+    restart) stop && start ;;
+    status) running ;;
+    *) echo "Usage: $0 {start|stop|restart|status}" >&2; exit 2 ;;
+esac

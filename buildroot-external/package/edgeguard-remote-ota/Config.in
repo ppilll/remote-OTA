@@ -1,0 +1,28 @@
+config BR2_PACKAGE_EDGEGUARD_REMOTE_OTA
+	bool "edgeguard-remote-ota"
+	depends on BR2_PACKAGE_RAUC
+	depends on BR2_USE_MMU
+	depends on BR2_USE_WCHAR
+	depends on BR2_TOOLCHAIN_HAS_THREADS
+	depends on !BR2_STATIC_LIBS
+	select BR2_PACKAGE_EDGEGUARD_RK_AB
+	select BR2_PACKAGE_LIBCURL
+	select BR2_PACKAGE_LIBGLIB2
+	select BR2_PACKAGE_JSON_GLIB
+	help
+	  GNU11 EdgeGuard remote OTA Agent, RAUC pre-install safety gate,
+	  static symmetric RAUC profile and BusyBox/SysV startup integration.
+	  Requires provisioned /etc/rauc/keyring.pem and persistent /userdata.
+	  Service callback binding from the merged Agent is required to operate.
+
+if BR2_PACKAGE_EDGEGUARD_REMOTE_OTA
+
+config BR2_PACKAGE_EDGEGUARD_REMOTE_OTA_RELEASE_FILE
+	string "Release identity JSON input (absolute build-machine path)"
+	help
+	  Required JSON with schema_version, device_compatible, rauc_compatible,
+	  version and build_id for THIS image. See release.json.in and README.md.
+	  Build fails if missing, invalid, or template placeholders remain.
+	  No server-derived identity and no generated fallback version.
+
+endif

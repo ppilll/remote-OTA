@@ -1,0 +1,56 @@
+#!/bin/sh
+# RAUC 1.5.1 pre-install substrate gate. Never sourced; no eval or metadata writes.
+set -eu
+set -f
+PATH=/usr/bin:/bin
+export PATH
+ABCTL=/usr/bin/edgeguard-rk-abctl
+
+fail()
+{
+    printf '%s\n' "edgeguard-rk-ab-preinstall: $*" >&2
+    exit 1
+}
+
+[ "$#" -eq 0 ] || fail "unexpected arguments"
+# Sentinel preserves trailing newlines so ambiguous output cannot be normalized.
+current=$("$ABCTL" get-current && printf '.') || fail "current-slot identity failed"
+case "$current" in
+    'a.'|'a
+.') rootfs=rootfs.1; boot=boot.1 ;;
+    'b.'|'b
+.') rootfs=rootfs.0; boot=boot.0 ;;
+    *) fail "ambiguous current-slot identity" ;;
+esac
+
+# RAUC_TARGET_SLOTS contains numeric environment indices, not slot names.
+# Reset IFS and disable globbing before intentionally splitting that one value.
+IFS=' 	
+'
+set -- ${RAUC_TARGET_SLOTS-}
+[ "$#" -eq 2 ] || fail "expected exactly two target indices"
+[ "$1" != "$2" ] || fail "duplicate target index"
+found_rootfs=0
+found_boot=0
+for index in "$@"; do
+    case "$index" in
+        ''|*[!0-9]*) fail "non-numeric target index" ;;
+        0) ;;
+        0*) fail "noncanonical target index" ;;
+    esac
+    # printenv receives a single validated variable name. Its result is data.
+    name=$(printenv "RAUC_SLOT_NAME_$index" && printf '.') || fail "missing target slot name"
+    case "$name" in
+        "$rootfs
+.")
+            [ "$found_rootfs" -eq 0 ] || fail "duplicate rootfs target"
+            found_rootfs=1 ;;
+        "$boot
+.")
+            [ "$found_boot" -eq 0 ] || fail "duplicate boot target"
+            found_boot=1 ;;
+        *) fail "unexpected target slot" ;;
+    esac
+done
+[ "$found_rootfs" -eq 1 ] && [ "$found_boot" -eq 1 ] || fail "incomplete opposite target group"
+exit 0
