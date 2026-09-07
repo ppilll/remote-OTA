@@ -2,6 +2,6 @@
   "schema_version": 1,
   "device_compatible": "atk-dlrk3588",
   "rauc_compatible": "EdgeGuard-ATK-DLRK3588-RK3588",
-  "version": "1.2.2",
-  "build_id": "rk3588-r3g-1.2.2-001"
+  "version": "1.2.4",
+  "build_id": "rk3588-r3h-1.2.4-001"
 }

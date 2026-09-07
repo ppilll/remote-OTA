@@ -1,0 +1,29 @@
+EdgeGuard Remote OTA R3 — 极简命令速查
+==========================================
+
+[Ubuntu：完整构建]
+cd /home/liu2004/work/EG_OTA
+VERSION='1.2.5'
+BUILD_ID='rk3588-r3h-1.2.5-001'
+./build-r3-candidate.sh "$VERSION" "$BUILD_ID" all
+
+[Ubuntu：发布同一 candidate]
+./publish-r3-candidate.sh "$VERSION" "$BUILD_ID"
+
+[RK3588：等待生产 Agent 自动发现]
+# 无命令；当前轮询周期 300 秒。
+
+[RK3588：立即触发生产 Agent]
+/etc/init.d/S99edgeguard-remote-ota restart
+
+[RK3588：串口前台模式，仅维护/观察]
+/etc/init.d/S99edgeguard-remote-ota stop
+exec /usr/bin/edgeguard-remote-ota-agent --config /etc/edgeguard-ota/agent.conf
+
+[禁止]
+不要手工 curl update.raucb
+不要手工 rauc install / rauc mark-good
+不要在 INSTALLING 后中断 Agent/RAUC
+不要删除 agent-state.json 重试
+timeout/outcome uncertain：同一 attempt_id 绝不 reinstall
+

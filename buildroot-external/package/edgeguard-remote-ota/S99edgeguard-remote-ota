@@ -3,6 +3,7 @@
 DAEMON=/usr/bin/edgeguard-remote-ota-agent
 CONFIG=/etc/edgeguard-ota/agent.conf
 PIDFILE=/var/run/edgeguard-remote-ota.pid
+AUTOSTART_DISABLE_FILE=/userdata/edgeguard-remote-ota/autostart-disabled
 PATH=/sbin:/usr/sbin:/bin:/usr/bin
 export PATH
 umask 077
@@ -28,6 +29,15 @@ start()
     }
     mkdir -p /userdata/edgeguard-remote-ota || return 1
     chmod 0700 /userdata/edgeguard-remote-ota || return 1
+
+    # Persistent foreground-campaign gate. /userdata is shared across A/B
+    # slots, so a marker created before installation also suppresses
+    # automatic startup after booting the candidate slot.
+    if [ -e "$AUTOSTART_DISABLE_FILE" ]; then
+        echo "edgeguard-remote-ota: autostart disabled by $AUTOSTART_DISABLE_FILE" >&2
+        return 0
+    fi
+
     start-stop-daemon -S -q -b -m -p "$PIDFILE" -x "$DAEMON" -- --config "$CONFIG" || return 1
     # Catch immediate configuration/service-binding failure. This is process
     # liveness only, never OTA health acceptance or a restart loop.
