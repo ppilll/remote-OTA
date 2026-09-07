@@ -279,7 +279,7 @@ static void assert_terminal(Matrix *m, OtaState start, const OtaRelease *release
 
 static gboolean fail_step(void *user, OtaIoStep step)
 {
-    return step != GPOINTER_TO_INT(user);
+    return (int)step != GPOINTER_TO_INT(user);
 }
 
 static void matrix_case(Matrix *m, gconstpointer data)

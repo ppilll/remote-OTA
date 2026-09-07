@@ -38,7 +38,7 @@ REPO="$SCRIPT_DIR"
 
 PKI="${EDGEGUARD_RAUC_PKI:-$HOME/.local/share/edgeguard-ota/pki/r3-test-v3}"
 
-RAUC="${RAUC:-/usr/bin/rauc}"
+RAUC="${RAUC:-/home/liu2004/.local/rauc-1.5.1/bin/rauc}"
 
 DEFAULT_HOST_CONF="$REPO/buildroot-external/package/edgeguard-remote-ota/system.conf"
 HOST_CONF="${EDGEGUARD_RAUC_HOST_CONF:-$DEFAULT_HOST_CONF}"

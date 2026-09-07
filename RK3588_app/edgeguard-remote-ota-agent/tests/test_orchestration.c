@@ -127,7 +127,13 @@ static void guard_mark_good(Fixture *f, gconstpointer unused)
     start_at(f, OTA_STATE_MARK_GOOD);
     f->slot = OTA_SLOT_A;
     g_assert_cmpint(dispatch(f, &error), ==, 2);
-    g_assert_cmpint(f->phase_calls, ==, 0);
+    /*
+     * MARK_GOOD itself must be blocked before the service phase.
+     * The single phase call observed here is the subsequent durable ERROR
+     * report, which is intentionally reachable under the F6 contract.
+     * fake_phase() would g_assert_not_reached() if MARK_GOOD itself ran.
+     */
+    g_assert_cmpint(f->phase_calls, ==, 1);
     g_assert_cmpint(f->machine.current.state, ==, OTA_STATE_ERROR);
     g_assert_cmpint(error.code, ==, OTA_ERROR_IDENTITY_AMBIGUOUS);
 }
