@@ -11,20 +11,20 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from app.artifact_service import (
+from host_app.artifact_service import (
     MalformedRangeError,
     UnsatisfiableRangeError,
     select_range,
     stream_file_region,
 )
-from app.config import SETTINGS, Settings
-from app.logging_config import configure_logging
-from app.manifest_service import (
+from host_app.config import SETTINGS, Settings
+from host_app.logging_config import configure_logging
+from host_app.manifest_service import (
     ReleaseStateError,
     calculate_manifest,
     verify_cached_manifest,
 )
-from app.models import DeviceReport, Manifest
+from host_app.models import DeviceReport, Manifest
 
 
 LOGGER = configure_logging()

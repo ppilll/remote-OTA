@@ -8,8 +8,8 @@ from typing import Dict, Iterator
 import pytest
 from fastapi.testclient import TestClient
 
-from app.config import Settings
-from app.main import LOGGER, create_app
+from host_app.config import Settings
+from host_app.main import LOGGER, create_app
 
 
 @pytest.fixture

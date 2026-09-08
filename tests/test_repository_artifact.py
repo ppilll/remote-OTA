@@ -2,8 +2,8 @@
 
 import hashlib
 
-from app.config import SETTINGS
-from app.manifest_service import calculate_manifest
+from host_app.config import SETTINGS
+from host_app.manifest_service import calculate_manifest
 
 
 def test_repository_artifact_exists_and_matches_generated_manifest() -> None:

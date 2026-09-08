@@ -3,8 +3,8 @@
 import hashlib
 from pathlib import Path
 
-from app.config import Settings
-from app.models import Manifest
+from host_app.config import Settings
+from host_app.models import Manifest
 
 
 HASH_CHUNK_SIZE = 1024 * 1024
