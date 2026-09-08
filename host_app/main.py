@@ -273,6 +273,17 @@ def create_app(settings: Settings = SETTINGS) -> FastAPI:
 
     @application.post("/device/report", status_code=204, response_class=Response)
     async def post_device_report(report: DeviceReport, request: Request) -> Response:
+        correlation = {}
+        if report.attempt_id is not None:
+            correlation["attempt_id"] = report.attempt_id
+        if report.target_version is not None:
+            correlation["target_version"] = report.target_version
+        if report.build_id is not None:
+            correlation["build_id"] = report.build_id
+        if report.agent_state is not None:
+            correlation["agent_state"] = report.agent_state.value
+        if report.error_code is not None:
+            correlation["error_code"] = report.error_code.value
         LOGGER.info(
             "device_report_accepted",
             extra={
@@ -284,6 +295,7 @@ def create_app(settings: Settings = SETTINGS) -> FastAPI:
                 "method": request.method,
                 "path": request.url.path,
                 "response_code": 204,
+                **correlation,
             },
         )
         return Response(status_code=204)
