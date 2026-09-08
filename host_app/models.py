@@ -2,7 +2,9 @@
 
 from datetime import datetime
 from enum import Enum
-from typing import Annotated
+from typing import Optional
+
+from typing_extensions import Annotated
 
 from pydantic import (
     BaseModel,
@@ -101,13 +103,13 @@ class DeviceReport(BaseModel):
     current_version: str
     status: DeviceStatus
     timestamp: datetime
-    attempt_id: StrictStr | None = None
-    target_version: StrictStr | None = None
-    build_id: StrictStr | None = None
-    agent_state: AgentState | None = None
-    error_code: AgentErrorCode | None = None
-    timestamp_valid: StrictBool | None = None
-    uptime_ms: UptimeMilliseconds | None = None
+    attempt_id: Optional[StrictStr] = None
+    target_version: Optional[StrictStr] = None
+    build_id: Optional[StrictStr] = None
+    agent_state: Optional[AgentState] = None
+    error_code: Optional[AgentErrorCode] = None
+    timestamp_valid: Optional[StrictBool] = None
+    uptime_ms: Optional[UptimeMilliseconds] = None
 
     @field_validator("device_id", "current_version")
     @classmethod
@@ -142,8 +144,8 @@ class DeviceReport(BaseModel):
     @field_validator("attempt_id", "target_version", "build_id")
     @classmethod
     def extended_text_matches_agent_bounds(
-        cls, value: str | None, info: ValidationInfo
-    ) -> str | None:
+        cls, value: Optional[str], info: ValidationInfo
+    ) -> Optional[str]:
         if value is None:
             return value
         capacity = 37 if info.field_name == "attempt_id" else 256

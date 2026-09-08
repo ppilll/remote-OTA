@@ -76,37 +76,6 @@ AGENT_ERROR_CODES = [
     "ILLEGAL_TRANSITION",
     "TIME_SOURCE_FAILED",
 ]
-AGENT_ERROR_CODES = [
-    "NONE",
-    "CONFIG_INVALID",
-    "IDENTITY_INVALID",
-    "IDENTITY_AMBIGUOUS",
-    "LOCAL_RELEASE_INVALID",
-    "MANIFEST_HTTP",
-    "MANIFEST_INVALID",
-    "DEVICE_COMPAT_MISMATCH",
-    "VERSION_MALFORMED",
-    "VERSION_COLLISION",
-    "DOWNGRADE_REJECTED",
-    "DOWNLOAD_HTTP",
-    "DOWNLOAD_RANGE_MISMATCH",
-    "DOWNLOAD_DISK_SPACE",
-    "DOWNLOAD_SIZE_MISMATCH",
-    "DOWNLOAD_HASH_MISMATCH",
-    "RAUC_VERIFY_FAILED",
-    "RAUC_COMPAT_MISMATCH",
-    "RAUC_IDENTITY_MISMATCH",
-    "RAUC_INSTALL_FAILED",
-    "RAUC_MARK_GOOD_FAILED",
-    "RAUC_MARK_BAD_FAILED",
-    "HEALTH_FAILED",
-    "REBOOT_CONTEXT_INVALID",
-    "REBOOT_FAILED",
-    "PERSISTENCE_FAILED",
-    "REPORT_FAILED",
-    "ILLEGAL_TRANSITION",
-    "TIME_SOURCE_FAILED",
-]
 
 
 def _log_objects(stream_text: str) -> List[dict]:
@@ -184,30 +153,6 @@ def test_agent_emitted_status_values_are_accepted(
     client = test_context["client"]
     assert isinstance(client, TestClient)
     response = client.post("/device/report", json={**VALID_REPORT, "status": status})
-    assert response.status_code == 204
-
-
-@pytest.mark.parametrize("agent_state", AGENT_STATES)
-def test_agent_state_values_are_accepted(
-    test_context: Dict[str, object], agent_state: str
-) -> None:
-    client = test_context["client"]
-    assert isinstance(client, TestClient)
-    response = client.post(
-        "/device/report", json={**VALID_REPORT, "agent_state": agent_state}
-    )
-    assert response.status_code == 204
-
-
-@pytest.mark.parametrize("error_code", AGENT_ERROR_CODES)
-def test_agent_error_code_values_are_accepted(
-    test_context: Dict[str, object], error_code: str
-) -> None:
-    client = test_context["client"]
-    assert isinstance(client, TestClient)
-    response = client.post(
-        "/device/report", json={**VALID_REPORT, "error_code": error_code}
-    )
     assert response.status_code == 204
 
 

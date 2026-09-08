@@ -4,7 +4,7 @@ PATH=/usr/sbin:/usr/bin:/sbin:/bin
 export PATH
 
 REQUIRED_STREAK=3
-MAX_SAMPLES=6
+MAX_SAMPLES=5
 SAMPLE_INTERVAL_SEC=5
 
 process_present()

@@ -132,15 +132,15 @@ class HealthHookTests(unittest.TestCase):
             ({"wlan": False}, "wlan0_missing"),
             ({"connmand": False}, "connmand_missing"),
             ({"supplicant": False}, "wpa_supplicant_missing"),
-            ({"sequence": ("fail",) * 6}, "connman_wifi_unavailable"),
-            ({"sequence": ("no-wifi",) * 6}, "connman_wifi_unavailable"),
+            ({"sequence": ("fail",) * 5}, "connman_wifi_unavailable"),
+            ({"sequence": ("no-wifi",) * 5}, "connman_wifi_unavailable"),
         ]
         for arguments, reason in cases:
             with self.subTest(reason=reason, arguments=arguments):
                 result, _, sleeps = self.run_fixture(**arguments)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("HEALTH_FAIL reason=" + reason, result.stderr)
-                self.assertEqual(sleeps, ["5"] * 5)
+                self.assertEqual(sleeps, ["5"] * 4)
 
     def test_failures_reset_the_consecutive_success_streak(self):
         result, calls, sleeps = self.run_fixture(
@@ -151,12 +151,12 @@ class HealthHookTests(unittest.TestCase):
         self.assertEqual(sleeps, ["5"] * 4)
 
         result, calls, sleeps = self.run_fixture(
-            sequence=("pass", "fail", "pass", "fail", "pass", "pass")
+            sequence=("pass", "fail", "fail", "pass", "pass")
         )
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("successful_streak=2", result.stderr)
-        self.assertEqual(len(calls), 6)
-        self.assertEqual(sleeps, ["5"] * 5)
+        self.assertEqual(len(calls), 5)
+        self.assertEqual(sleeps, ["5"] * 4)
 
     def test_hook_contains_no_connectivity_or_mutation_commands(self):
         source = HOOK.read_text(encoding="utf-8")
