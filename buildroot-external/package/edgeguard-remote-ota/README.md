@@ -38,11 +38,16 @@ build-machine dependency only. No Agent runtime or metadata dependencies were ad
 Installed files:
 
 - /usr/bin/edgeguard-remote-ota-agent
+- /usr/libexec/edgeguard/edgeguard-health-check
 - /usr/libexec/rauc/edgeguard-rk-ab-preinstall (from the substrate source directory)
 - /etc/rauc/system.conf (symmetric writable slots plus pre-install handler)
-- /etc/edgeguard-ota/agent.conf (legacy reporting, empty optional hook)
+- /etc/edgeguard-ota/agent.conf (R4 local health hook, 30-second timeout,
+  extended reporting)
 - /etc/edgeguard-ota/release.json (validated input)
 - /etc/init.d/S99edgeguard-remote-ota (SysV hook only)
+
+The R4 candidate configuration requires the backward-compatible extended-report
+server to be host-verified and deployed before this image begins a campaign.
 
 The dependent edgeguard-rk-ab package owns abctl/backend installation unchanged.
 S99 requires /userdata to be mounted and writable, creates the private state

@@ -1,0 +1,70 @@
+#!/bin/sh
+set -u
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+
+REQUIRED_STREAK=3
+MAX_SAMPLES=6
+SAMPLE_INTERVAL_SEC=5
+
+process_present()
+{
+    expected_process=$1
+    for comm_path in /proc/[0-9]*/comm; do
+        [ -r "$comm_path" ] || continue
+        IFS= read -r process_name < "$comm_path" || continue
+        [ "$process_name" = "$expected_process" ] && return 0
+    done
+    return 1
+}
+
+sample_local_wifi()
+{
+    if [ ! -d /sys/class/net/wlan0 ]; then
+        failure_reason=wlan0_missing
+        return 1
+    fi
+    if ! process_present connmand; then
+        failure_reason=connmand_missing
+        return 1
+    fi
+    if ! process_present wpa_supplicant; then
+        failure_reason=wpa_supplicant_missing
+        return 1
+    fi
+    if ! connman_technologies=$(/usr/bin/connmanctl technologies 2>/dev/null); then
+        failure_reason=connman_wifi_unavailable
+        return 1
+    fi
+    if ! printf '%s\n' "$connman_technologies" |
+        grep -Eq '^[[:space:]]*Type[[:space:]]*=[[:space:]]*wifi[[:space:]]*$'; then
+        failure_reason=connman_wifi_unavailable
+        return 1
+    fi
+    return 0
+}
+
+sample_number=1
+successful_streak=0
+last_failure=none
+
+while [ "$sample_number" -le "$MAX_SAMPLES" ]; do
+    if sample_local_wifi; then
+        successful_streak=$((successful_streak + 1))
+        if [ "$successful_streak" -ge "$REQUIRED_STREAK" ]; then
+            exit 0
+        fi
+    else
+        successful_streak=0
+        last_failure=$failure_reason
+    fi
+
+    sample_number=$((sample_number + 1))
+    if [ "$sample_number" -le "$MAX_SAMPLES" ]; then
+        sleep "$SAMPLE_INTERVAL_SEC"
+    fi
+done
+
+printf 'HEALTH_FAIL reason=%s successful_streak=%s\n' \
+    "$last_failure" "$successful_streak" >&2
+exit 1

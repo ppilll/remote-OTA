@@ -1,7 +1,7 @@
 """Portable checks for merged F1-F7 source/build contracts, not C runtime proof."""
 from pathlib import Path
+import os
 import re
-import subprocess
 import unittest
 
 
@@ -35,13 +35,16 @@ class MergedSourceContract(unittest.TestCase):
         config = (PACKAGE / "agent.conf").read_text(encoding="utf-8")
         profile = (PACKAGE / "system.conf").read_text(encoding="utf-8")
         self.assertIn("request_timeout_sec=600", config)
-        self.assertIn("mode=legacy", config)
+        self.assertIn("hook=/usr/libexec/edgeguard/edgeguard-health-check", config)
+        self.assertIn("timeout_sec=30", config)
+        self.assertIn("mode=extended", config)
         self.assertNotIn("readonly", profile)
 
     def test_shell_bytes_and_attributes(self):
         paths = [ROOT / "RK3588_app/edgeguard-rk-ab/edgeguard-rk-ab-backend",
                  ROOT / "RK3588_app/edgeguard-rk-ab/edgeguard-rk-ab-preinstall",
                  PACKAGE / "S99edgeguard-remote-ota", PACKAGE / "post-build-check.sh",
+                 PACKAGE / "edgeguard-health-check",
                  ROOT / "build-rauc-bundle.sh"]
         for path in paths:
             data = path.read_bytes()
@@ -51,10 +54,8 @@ class MergedSourceContract(unittest.TestCase):
         attributes = (ROOT / ".gitattributes").read_text(encoding="utf-8")
         for suffix in ("*.raucb -text", "*.img -text", "*.ext4 -text"):
             self.assertIn(suffix, attributes)
-        mode = subprocess.run(["git", "ls-files", "-s", "--",
-                               "buildroot-external/package/edgeguard-remote-ota/post-build-check.sh"],
-                              cwd=str(ROOT), capture_output=True, text=True, check=True).stdout
-        self.assertTrue(mode.startswith("100755 "), mode)
+        if os.name == "posix":
+            self.assertTrue((PACKAGE / "post-build-check.sh").stat().st_mode & 0o111)
 
     def test_bundle_helper_uses_production_profile_and_data_parser(self):
         helper = (ROOT / "build-rauc-bundle.sh").read_text(encoding="utf-8")

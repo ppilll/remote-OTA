@@ -97,8 +97,10 @@ class PackageTests(unittest.TestCase):
     def test_default_config_and_build_sources(self):
         config = configparser.ConfigParser(interpolation=None)
         config.read(str(PACKAGE / "agent.conf"), encoding="utf-8")
-        self.assertEqual(config["reporting"]["mode"], "legacy")
-        self.assertEqual(config["health"]["hook"], "")
+        self.assertEqual(config["reporting"]["mode"], "extended")
+        self.assertEqual(config["health"]["hook"],
+                         "/usr/libexec/edgeguard/edgeguard-health-check")
+        self.assertEqual(config["health"]["timeout_sec"], "30")
         self.assertEqual(config["rauc"]["binary"], "/usr/bin/rauc")
         self.assertEqual(config["server"]["request_timeout_sec"], "600")
         source = (AGENT / "src/config.c").read_text(encoding="utf-8")
@@ -111,6 +113,7 @@ class PackageTests(unittest.TestCase):
         self.assertIn("EDGEGUARD_REMOTE_OTA_SITE_METHOD = local", makefile)
         self.assertIn("EDGEGUARD_REMOTE_OTA_INSTALL_INIT_SYSV", makefile)
         self.assertIn("PKG_CONFIG_SYSROOT_DIR", makefile)
+        self.assertIn("/usr/libexec/edgeguard/edgeguard-health-check", makefile)
         self.assertIn("package/edgeguard-remote-ota/Config.in",
                       (ROOT / "buildroot-external/Config.in").read_text(encoding="utf-8"))
 

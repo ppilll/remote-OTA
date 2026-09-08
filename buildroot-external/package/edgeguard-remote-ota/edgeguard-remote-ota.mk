@@ -33,6 +33,8 @@ define EDGEGUARD_REMOTE_OTA_INSTALL_TARGET_CMDS
 		$(TARGET_DIR)/usr/bin/edgeguard-remote-ota-agent
 	$(INSTALL) -D -m 0644 $(EDGEGUARD_REMOTE_OTA_PACKAGE_DIR)/agent.conf \
 		$(TARGET_DIR)/etc/edgeguard-ota/agent.conf
+	$(INSTALL) -D -m 0755 $(EDGEGUARD_REMOTE_OTA_PACKAGE_DIR)/edgeguard-health-check \
+		$(TARGET_DIR)/usr/libexec/edgeguard/edgeguard-health-check
 	$(INSTALL) -D -m 0644 $(@D)/release.json \
 		$(TARGET_DIR)/etc/edgeguard-ota/release.json
 	$(INSTALL) -D -m 0755 \
