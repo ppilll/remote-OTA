@@ -1,126 +1,63 @@
-# EdgeGuard Remote OTA — R4 Documentation Package
+# EdgeGuard Remote OTA R4 最终冻结包
 
-## 1. Purpose
+冻结日期：2026-09-09  
+适用平台：ATK-DLRK3588 / RK3588  
+R4 最终项目结论：`PASS`（以本包记录的修订后 acceptance criteria 为准）
 
-This package is the architecture and verification contract for **R4 — Automatic Wi-Fi Remote OTA**.
+## 1. 本包用途
 
-R4 asks one question:
+本包是 R4 退出与 R5/R6 进入的权威交接入口。它不重新设计 R0–R4 架构，也不替代既有过程文档；它把已经冻结的实现、真实阶段基线、问题处置、证据边界和后续不可回退 contracts 汇总到一个可直接使用的入口。
 
-> Can the device complete the OTA lifecycle repeatedly, without an engineer logging in to the target, while preserving safety across network loss, process restart, reboot, health failure, and report failure?
+本包重点回答：
 
-R4 is an incremental hardening and evidence stage. It is not a redesign of the R0–R3/BOOT-GATE system.
+- R5/R6 必须继承什么，不能重构什么；
+- target、server、SDK、RAUC、Native A/B、Agent 和 release 从什么状态继续；
+- R4 中实际发生了什么问题，根因和处置是什么；
+- 哪些结论来自 host、SDK 或真实 target，哪些不能相互替代；
+- Wi-Fi credential persistence/autoconnect 为什么从 R4 移出，以及后续由谁负责。
 
-## 2. Evidence vocabulary
+## 2. 文档优先级
 
-Every normative claim in this package uses one of these classes.
+出现冲突时按以下顺序处理：
 
-| Label | Meaning |
+1. 本 `R4_FREEZE_PACKAGE` 对 R4 最终状态、修订后 acceptance criteria、R5/R6 交接边界的说明；
+2. `docs/R4/03_AUTOMATION_INVARIANTS.md` 的安全不变量；
+3. `docs/R4/02_ARCHITECTURE_CONTEXT.md`、`04_HEALTH_POLICY.md`、`05_FAILURE_RECOVERY_SPEC.md`、`07_STATE_MACHINE_DELTA.md` 的冻结架构与行为定义；
+4. R0–R3 与 `docs/BOOT-GATE` 已冻结事实；
+5. 过程报告与早期 proposed values。
+
+`docs/R4/00_README.md` 至 `09_CODEX_THREADS.md` 形成于 R4 进入/实施期。其中的 `NOT YET VERIFIED`、旧 target snapshot、旧实验室地址和 Wi-Fi autoconnect 入场条件是历史时点信息；本包只在“最终状态与 acceptance criteria”上取代这些内容，不撤销其架构、安全和实现说明。
+
+## 3. 包内容
+
+| 文件 | 用途 |
 |---|---|
-| **FROZEN FACT** | Accepted R0–R3/BOOT-GATE result. R4 must preserve it unless new contradictory evidence is recorded. |
-| **CODE REVIEWED** | Present in the reviewed GitHub R3 implementation. This is not target execution evidence. |
-| **HOST VERIFIED** | Demonstrated by host-side tests or fixtures. This is not target verification. |
-| **TARGET OBSERVED** | A point-in-time fact collected from the RK3588 target. It does not by itself prove a full campaign. |
-| **TARGET VERIFIED** | Demonstrated on the real target by a bounded campaign with retained evidence. |
-| **ARCHITECTURE DECISION** | R4 design choice approved by this package. |
-| **PROPOSED VALUE** | Initial value to implement and measure; it remains tunable until target evidence freezes it. |
-| **DEFERRED** | Intentionally outside R4. |
+| `01_FINAL_BASELINE.md` | 当前 target/server/SDK/RAUC/A-B/Agent/release 起点 |
+| `02_FROZEN_CONTRACTS.md` | 架构、接口、状态机、证据等级和不可回退边界 |
+| `03_PROBLEMS_AND_DECISIONS.md` | R4 实际问题、根因、解决方案、排除与延期项 |
+| `04_EVIDENCE_AND_VERDICT.md` | 证据矩阵、acceptance-criteria 调整与最终 verdict |
+| `05_R5_R6_HANDOFF.md` | R5/R6 的进入条件、工作边界和 handoff notes |
+| `06_EVIDENCE_REFERENCES.md` | 仓库内外证据索引及引用规则 |
 
-Absence of a `TARGET VERIFIED` label must never be upgraded by inference from code, host tests, or a single target snapshot.
+建议顺序：`01` → `02` → `03` → `04` → `05`；审计或定位原始依据时再读 `06`。
 
-## 3. Frozen entry position
-
-- **FROZEN FACT — TARGET VERIFIED:** R3 real-device happy path passed.
-- **FROZEN FACT — TARGET VERIFIED:** Native Rockchip A/B behavior passed the prior target campaign.
-- **FROZEN FACT:** RAUC version remains 1.5.1 with the existing custom bootloader/backend architecture.
-- **FROZEN FACT:** R4 is cleared to start.
-- **CODE REVIEWED:** GitHub `main` was reviewed at commit `2be352dbccbaa31beeb0ee402e85b0defb15cef2` (`R3-验证通过完整版`).
-- **ARCHITECTURE DECISION:** GitHub is the authoritative repository view for this work. No additional Ubuntu working-tree audit is required by this package.
-
-## 4. Current target entry baseline
-
-The following is the user-supplied live snapshot. It is a baseline, not an R4 campaign verdict.
-
-| Item | Observed value | Evidence class |
-|---|---|---|
-| Release | `1.2.4` | TARGET OBSERVED |
-| Build ID | `rk3588-r3h-1.2.4-001` | TARGET OBSERVED |
-| Current slot | `b` | TARGET OBSERVED |
-| Primary slot | `b` | TARGET OBSERVED |
-| Slot A | `confirmed-good` | TARGET OBSERVED |
-| Slot B | `confirmed-good` | TARGET OBSERVED |
-| Agent | Running | TARGET OBSERVED |
-| `autostart-disabled` | Absent | TARGET OBSERVED |
-| Durable state | `REPORT_SUCCESS` | TARGET OBSERVED |
-| Attempt ID | `c035795a-2a2e-4c23-8dce-8457fb91a579` | TARGET OBSERVED |
-| `wlan0` | Present, administratively/runtime down | TARGET OBSERVED |
-| Reason Wi-Fi is down | User intentionally did not connect Wi-Fi | TARGET OBSERVED context |
-| `connmand` | Running | TARGET OBSERVED |
-| `wpa_supplicant` | Running | TARGET OBSERVED |
-| `/userdata` | Mounted read/write and writable | TARGET OBSERVED |
-| Configured server | `http://10.119.65.50:8000` | TARGET OBSERVED |
-| Reporting mode | `legacy` | TARGET OBSERVED |
-
-Interpretation:
-
-- The installed firmware is already accepted: slot `b` is primary and both slots are confirmed-good.
-- `REPORT_SUCCESS` is a durable, unfulfilled external reporting obligation after committed success. It is not an install failure and not a health failure.
-- The attempt must not be reinstalled, rolled back, or marked good again merely because reporting is pending.
-- `wlan0` being down in this snapshot is expected because Wi-Fi was intentionally not connected. It must not be used as evidence that the firmware is unhealthy.
-- A clean R4 campaign baseline requires the pending report obligation to complete and durable state to return to `IDLE`; that closure is not claimed by this package.
-
-## 5. R4 architecture decisions
-
-1. **Preserve R3 orchestration.** No state-machine rewrite and no durable-state schema change are planned.
-2. **Preserve built-in health.** Add one bounded, local-only external health hook for the Wi-Fi control plane.
-3. **Do not equate network availability with firmware health.** AP, DHCP, DNS, Internet, and OTA-server reachability are not hard firmware-health gates.
-4. **Use the existing lab endpoint contract.** R4 uses `http://10.119.65.50:8000` as a stable laboratory address.
-5. **Defer persistent endpoint override.** It belongs to R5 unless the stable lab IP cannot be guaranteed.
-6. **Extend reporting additively.** The server must accept both legacy and optional extended report fields before the R4 candidate enables Agent extended mode.
-7. **Use two ownership-separated Codex workstreams.** One owns target health/Buildroot/tests; one owns backward-compatible server reporting.
-
-## 6. Package map
-
-| File | Purpose |
-|---|---|
-| `02_ARCHITECTURE_CONTEXT.md` | Frozen platform, component boundaries, reviewed R3 behavior, and R4 deltas |
-| `03_AUTOMATION_INVARIANTS.md` | Safety properties that all implementation and campaigns must preserve |
-| `04_HEALTH_POLICY.md` | Built-in plus external health contract and Wi-Fi semantics |
-| `05_FAILURE_RECOVERY_SPEC.md` | Required behavior for every relevant interruption/failure class |
-| `07_STATE_MACHINE_DELTA.md` | Exact delta against the frozen R3 state machine |
-| `08_TEST_PLAN.md` | Host, SDK/Buildroot, and real-target campaign matrix |
-| `09_CODEX_THREADS.md` | Ownership split, integration gates, and handoff requirements; not executable prompts |
-
-## 7. Scope boundaries
-
-R4 does not redesign or add:
-
-- RTL8733BU bring-up or ConnMan architecture;
-- R2 manifest, artifact, or HTTP Range architecture;
-- GPT layout, U-Boot A/B algorithm, or Rockchip `AvbABData` format;
-- RAUC 1.5.1 custom bootloader architecture;
-- the R3 Agent state machine from scratch;
-- BLE provisioning, fleet/cloud control, watchdog campaigns, or power-cut campaigns;
-- persistent runtime endpoint provisioning, unless the stable lab IP contract proves impossible.
-
-## 8. Document precedence and change control
-
-When documents appear to conflict, apply this order:
-
-1. Frozen R0–R3/BOOT-GATE facts and retained target evidence.
-2. Safety invariants in `03_AUTOMATION_INVARIANTS.md`.
-3. Architecture decisions in this package.
-4. Proposed values, which may be tuned only with recorded evidence.
-
-Any implementation discovery that appears to require changes to `main.c`, `state_machine.c`, `persistence.c`, the durable-state schema, Native A/B semantics, or RAUC architecture must stop at a documented finding. It is not implicitly authorized by this package.
-
-## 9. Current R4 verdict
+## 4. 一句话冻结结论
 
 ```text
-R4 entry: CLEARED
-R4 implementation: NOT YET VERIFIED
-R4 host verification: NOT YET RECORDED FOR THE DELTA
-R4 SDK/Buildroot verification: NOT YET RECORDED
-R4 target campaigns: NOT YET VERIFIED
-Current reporting debt: OPEN (durable REPORT_SUCCESS)
+R4 FINAL VERDICT = PASS
+
+条件：
+- 使用修订后的 R4 acceptance criteria；
+- Wi-Fi credential persistence/autoconnect across full-rootfs replacement = N/A for R4；
+- 该能力转交 provisioning / persistent runtime configuration；
+- OTA、RAUC、Native A/B、durable recovery、health/mark-good、rollback 和 post-commit reporting contracts 保持冻结。
 ```
+
+## 5. 证据纪律
+
+- Codex/ChatGPT 的分析、总结或成功退出码本身不是 target evidence。
+- Host tests 只能形成 `HOST VERIFIED`。
+- Vendor SDK 构建与最终镜像检查只能形成 `SDK BUILD VERIFIED`。
+- 只有带 release/build、attempt、boot ID、slot、durable state、RAUC/Native A/B 和 server correlation 的真实 RK3588 记录，才能形成对应范围的 `TARGET VERIFIED`。
+- 项目 verdict 可以由阶段负责人按 acceptance criteria 签收；这不允许把缺失的原始 target 日志伪造为已审阅证据。
 
