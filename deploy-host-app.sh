@@ -10,25 +10,27 @@ set -uo pipefail
 #   - validate local host_app source
 #   - validate production Python environment
 #   - synchronize Python dependencies
+#   - preserve the currently active OTA release metadata
 #   - preflight host_app with production interpreter/service user
 #   - deploy host_app to /opt/edgeguard-ota/host_app
 #   - switch systemd from app.main:app to host_app.main:app
 #   - restart and verify the server
-#   - rollback automatically if restart/HTTP verification fails
+#   - prove that deployment did NOT change the active OTA manifest
+#   - rollback automatically if deployment/runtime verification fails
 #
 # Intentionally NOT touched:
 #   - /opt/edgeguard-ota/artifacts
 #   - published RAUC bundles
-#   - current OTA release/version
+#   - current OTA release/version/build/artifact selection
 #
-# First migration:
-#   - /opt/edgeguard-ota/app is intentionally retained for rollback
-#
-# Subsequent deployments:
-#   - only one /opt/edgeguard-ota/host_app.previous is retained
+# Release switching belongs ONLY to:
+#   publish-r3-candidate.sh
 #
 # Usage:
 #   bash deploy-host-app.sh
+#
+# Optional laboratory IP override:
+#   EDGEGUARD_SERVER_IP=192.168.77.1 bash deploy-host-app.sh
 #
 # Do NOT run with:
 #   source deploy-host-app.sh
@@ -53,11 +55,19 @@ DROPIN="$DROPIN_DIR/10-host-app.conf"
 LOG=""
 STAGE=""
 DROPIN_BACKUP=""
+RELEASE_SNAPSHOT=""
+PRE_MANIFEST=""
+RUNTIME_MANIFEST=""
 
 HAD_HOST_APP=0
 HAD_DROPIN=0
 APP_SWITCHED=0
 DROPIN_CHANGED=0
+
+CURRENT_APP_KIND=""
+CURRENT_CONFIG=""
+PRE_MANIFEST_STATUS=""
+RUNTIME_MANIFEST_STATUS=""
 
 
 ###############################################################################
@@ -76,6 +86,18 @@ cleanup()
 
     if [ -n "${DROPIN_BACKUP:-}" ]; then
         rm -f "$DROPIN_BACKUP" >/dev/null 2>&1 || true
+    fi
+
+    if [ -n "${RELEASE_SNAPSHOT:-}" ]; then
+        rm -f "$RELEASE_SNAPSHOT" >/dev/null 2>&1 || true
+    fi
+
+    if [ -n "${PRE_MANIFEST:-}" ]; then
+        rm -f "$PRE_MANIFEST" >/dev/null 2>&1 || true
+    fi
+
+    if [ -n "${RUNTIME_MANIFEST:-}" ]; then
+        rm -f "$RUNTIME_MANIFEST" >/dev/null 2>&1 || true
     fi
 
     sudo rm -rf "$NEW_APP" >/dev/null 2>&1 || true
@@ -121,6 +143,383 @@ run_quiet()
 
 
 ###############################################################################
+# Snapshot current production release metadata
+#
+# Preserve ONLY deployment/runtime release selection:
+#
+#   version
+#   build_id
+#   artifact_path
+#
+# Protocol/application source itself still comes from the repository.
+###############################################################################
+
+snapshot_release_config()
+{
+    local source_config="$1"
+
+    sudo python3 - "$source_config" >"$RELEASE_SNAPSHOT" <<'PY'
+from pathlib import Path
+import json
+import re
+import sys
+
+path = Path(sys.argv[1])
+
+try:
+    text = path.read_text(encoding="utf-8")
+except OSError as exc:
+    raise SystemExit(
+        "cannot read current production config {}: {}".format(path, exc)
+    )
+
+specs = {
+    "version": (
+        r'(?m)^(    version: str = "([^"]+)")$',
+        2,
+    ),
+    "build_id": (
+        r'(?m)^(    build_id: str = "([^"]+)")$',
+        2,
+    ),
+    "artifact_path": (
+        r'(?m)^(    artifact_path: Path = .+)$',
+        None,
+    ),
+}
+
+result = {}
+
+for name, (pattern, value_group) in specs.items():
+    matches = list(re.finditer(pattern, text))
+
+    if len(matches) != 1:
+        raise SystemExit(
+            "{} assignment count={} in {}".format(
+                name,
+                len(matches),
+                path,
+            )
+        )
+
+    match = matches[0]
+
+    result[name + "_line"] = match.group(1)
+
+    if value_group is not None:
+        result[name] = match.group(value_group)
+
+if not result["version"]:
+    raise SystemExit("empty production version")
+
+if not result["build_id"]:
+    raise SystemExit("empty production build_id")
+
+print(json.dumps(result, sort_keys=True))
+PY
+}
+
+
+###############################################################################
+# Inject preserved release state into a new config.py.
+###############################################################################
+
+apply_release_snapshot_user()
+{
+    local target_config="$1"
+
+    python3 - \
+        "$RELEASE_SNAPSHOT" \
+        "$target_config" <<'PY'
+from pathlib import Path
+import json
+import os
+import re
+import stat
+import sys
+
+snapshot_path = Path(sys.argv[1])
+target_path = Path(sys.argv[2])
+
+snapshot = json.loads(
+    snapshot_path.read_text(encoding="utf-8")
+)
+
+text = target_path.read_text(encoding="utf-8")
+
+updates = [
+    (
+        r'(?m)^    version: str = "[^"]+"$',
+        snapshot["version_line"],
+        "version",
+    ),
+    (
+        r'(?m)^    build_id: str = "[^"]+"$',
+        snapshot["build_id_line"],
+        "build_id",
+    ),
+    (
+        r'(?m)^    artifact_path: Path = .+$',
+        snapshot["artifact_path_line"],
+        "artifact_path",
+    ),
+]
+
+for pattern, replacement, name in updates:
+    text, count = re.subn(
+        pattern,
+        lambda match, replacement=replacement: replacement,
+        text,
+    )
+
+    if count != 1:
+        raise SystemExit(
+            "{} target assignment count={}".format(
+                name,
+                count,
+            )
+        )
+
+st = target_path.stat()
+
+tmp = target_path.with_name(
+    target_path.name + ".release-preserve.tmp"
+)
+
+with open(tmp, "w", encoding="utf-8") as f:
+    f.write(text)
+    f.flush()
+    os.fsync(f.fileno())
+
+os.chmod(
+    tmp,
+    stat.S_IMODE(st.st_mode),
+)
+
+os.replace(
+    tmp,
+    target_path,
+)
+
+print("RELEASE_CONFIG_INJECT=PASS")
+PY
+}
+
+
+apply_release_snapshot_root()
+{
+    local target_config="$1"
+
+    sudo python3 - \
+        "$RELEASE_SNAPSHOT" \
+        "$target_config" <<'PY'
+from pathlib import Path
+import json
+import os
+import re
+import stat
+import sys
+
+snapshot_path = Path(sys.argv[1])
+target_path = Path(sys.argv[2])
+
+snapshot = json.loads(
+    snapshot_path.read_text(encoding="utf-8")
+)
+
+text = target_path.read_text(encoding="utf-8")
+
+updates = [
+    (
+        r'(?m)^    version: str = "[^"]+"$',
+        snapshot["version_line"],
+        "version",
+    ),
+    (
+        r'(?m)^    build_id: str = "[^"]+"$',
+        snapshot["build_id_line"],
+        "build_id",
+    ),
+    (
+        r'(?m)^    artifact_path: Path = .+$',
+        snapshot["artifact_path_line"],
+        "artifact_path",
+    ),
+]
+
+for pattern, replacement, name in updates:
+    text, count = re.subn(
+        pattern,
+        lambda match, replacement=replacement: replacement,
+        text,
+    )
+
+    if count != 1:
+        raise SystemExit(
+            "{} target assignment count={}".format(
+                name,
+                count,
+            )
+        )
+
+st = target_path.stat()
+
+tmp = target_path.with_name(
+    target_path.name + ".release-preserve.tmp"
+)
+
+with open(tmp, "w", encoding="utf-8") as f:
+    f.write(text)
+    f.flush()
+    os.fsync(f.fileno())
+
+os.chmod(
+    tmp,
+    stat.S_IMODE(st.st_mode),
+)
+
+os.replace(
+    tmp,
+    target_path,
+)
+
+print("RELEASE_CONFIG_INJECT=PASS")
+PY
+}
+
+
+###############################################################################
+# Verify the activated production config still contains the exact release
+# assignments captured before deployment.
+###############################################################################
+
+verify_release_snapshot_root()
+{
+    local target_config="$1"
+
+    sudo python3 - \
+        "$RELEASE_SNAPSHOT" \
+        "$target_config" <<'PY'
+from pathlib import Path
+import json
+import re
+import sys
+
+snapshot_path = Path(sys.argv[1])
+target_path = Path(sys.argv[2])
+
+snapshot = json.loads(
+    snapshot_path.read_text(encoding="utf-8")
+)
+
+text = target_path.read_text(encoding="utf-8")
+
+checks = [
+    (
+        "version",
+        r'(?m)^    version: str = "[^"]+"$',
+        snapshot["version_line"],
+    ),
+    (
+        "build_id",
+        r'(?m)^    build_id: str = "[^"]+"$',
+        snapshot["build_id_line"],
+    ),
+    (
+        "artifact_path",
+        r'(?m)^    artifact_path: Path = .+$',
+        snapshot["artifact_path_line"],
+    ),
+]
+
+for name, pattern, expected in checks:
+    matches = re.findall(pattern, text)
+
+    if len(matches) != 1:
+        raise SystemExit(
+            "{} assignment count={} after activation".format(
+                name,
+                len(matches),
+            )
+        )
+
+    actual = matches[0]
+
+    if actual != expected:
+        raise SystemExit(
+            "{} changed during deployment:\n"
+            "actual  = {!r}\n"
+            "expected= {!r}".format(
+                name,
+                actual,
+                expected,
+            )
+        )
+
+print("ACTIVE_RELEASE_CONFIG_PRESERVED=PASS")
+PY
+}
+
+
+###############################################################################
+# Compare pre-deployment and post-deployment HTTP manifests semantically.
+###############################################################################
+
+verify_manifest_preserved()
+{
+    python3 - \
+        "$PRE_MANIFEST_STATUS" \
+        "$PRE_MANIFEST" \
+        "$RUNTIME_MANIFEST_STATUS" \
+        "$RUNTIME_MANIFEST" <<'PY'
+import json
+import sys
+
+(
+    before_status,
+    before_path,
+    after_status,
+    after_path,
+) = sys.argv[1:]
+
+if before_status != after_status:
+    raise SystemExit(
+        "manifest HTTP status changed: {} -> {}".format(
+            before_status,
+            after_status,
+        )
+    )
+
+if before_status == "204":
+    print("ACTIVE_RELEASE_MANIFEST_PRESERVED=PASS")
+    raise SystemExit(0)
+
+if before_status != "200":
+    raise SystemExit(
+        "unsupported preserved manifest status: {}".format(
+            before_status
+        )
+    )
+
+with open(before_path, encoding="utf-8") as f:
+    before = json.load(f)
+
+with open(after_path, encoding="utf-8") as f:
+    after = json.load(f)
+
+if before != after:
+    print("manifest before =", before)
+    print("manifest after  =", after)
+    raise SystemExit(
+        "active OTA manifest changed during host_app deployment"
+    )
+
+print("ACTIVE_RELEASE_MANIFEST_PRESERVED=PASS")
+PY
+}
+
+
+###############################################################################
 # Rollback
 ###############################################################################
 
@@ -131,9 +530,6 @@ rollback()
     echo "ROLLBACK"
     echo "============================================================"
 
-    #
-    # Restore systemd configuration first.
-    #
     if [ "$DROPIN_CHANGED" -eq 1 ]; then
 
         if [ "$HAD_DROPIN" -eq 1 ]; then
@@ -160,9 +556,6 @@ rollback()
     fi
 
 
-    #
-    # Restore Python application.
-    #
     if [ "$APP_SWITCHED" -eq 1 ]; then
 
         echo "Restoring previous application..."
@@ -172,35 +565,35 @@ rollback()
         if [ "$HAD_HOST_APP" -eq 1 ]; then
 
             if sudo test -d "$PREVIOUS_APP"; then
+
                 sudo mv -T \
                     "$PREVIOUS_APP" \
-                    "$PROD_APP"
+                    "$PROD_APP" \
+                    || true
+
             else
+
                 echo "CRITICAL: previous host_app backup missing"
+
             fi
 
         else
 
-            #
-            # First app -> host_app migration.
-            #
-            # Nothing needs to be moved back because the legacy:
-            #
-            #   /opt/edgeguard-ota/app
-            #
-            # was never modified.
-            #
-            echo "Legacy /opt/edgeguard-ota/app retained for rollback."
+            echo "Legacy $PROD/app retained for rollback."
 
         fi
+
     fi
 
 
     echo "Restarting previous server..."
 
     if sudo systemctl restart "$SERVICE"; then
+
         echo "rollback service restart: PASS"
+
     else
+
         echo "CRITICAL: rollback service restart failed"
 
         systemctl status \
@@ -208,6 +601,7 @@ rollback()
             --lines=40 \
             "$SERVICE" \
             || true
+
     fi
 }
 
@@ -219,14 +613,29 @@ rollback()
 cd "$REPO" || fail "cannot cd to $REPO"
 
 
-LOG="$(mktemp /tmp/edgeguard-host-app-deploy.XXXXXX.log)" ||
-    fail "cannot create temporary log"
+LOG="$(
+    mktemp /tmp/edgeguard-host-app-deploy.XXXXXX.log
+)" || fail "cannot create temporary log"
 
-STAGE="$(mktemp -d /tmp/edgeguard-host-app-preflight.XXXXXX)" ||
-    fail "cannot create temporary preflight directory"
+STAGE="$(
+    mktemp -d /tmp/edgeguard-host-app-preflight.XXXXXX
+)" || fail "cannot create temporary preflight directory"
 
-DROPIN_BACKUP="$(mktemp /tmp/edgeguard-host-app-systemd.XXXXXX)" ||
-    fail "cannot create temporary systemd backup"
+DROPIN_BACKUP="$(
+    mktemp /tmp/edgeguard-host-app-systemd.XXXXXX
+)" || fail "cannot create temporary systemd backup"
+
+RELEASE_SNAPSHOT="$(
+    mktemp /tmp/edgeguard-host-app-release.XXXXXX.json
+)" || fail "cannot create release snapshot"
+
+PRE_MANIFEST="$(
+    mktemp /tmp/edgeguard-host-app-manifest-before.XXXXXX.json
+)" || fail "cannot create pre-deployment manifest file"
+
+RUNTIME_MANIFEST="$(
+    mktemp /tmp/edgeguard-host-app-manifest-after.XXXXXX.json
+)" || fail "cannot create runtime manifest file"
 
 
 echo "============================================================"
@@ -244,7 +653,6 @@ echo "service    = $SERVICE"
 
 echo
 echo "=== 1. Local host_app source ==="
-
 
 test -d "$LOCAL_APP" ||
     fail "local host_app directory missing: $LOCAL_APP"
@@ -269,7 +677,6 @@ echo "local host_app source: PASS"
 echo
 echo "=== 2. Production environment ==="
 
-
 sudo test -d "$PROD" ||
     fail "production root missing: $PROD"
 
@@ -279,12 +686,15 @@ sudo test -x "$PROD/.venv/bin/python" ||
 sudo test -x "$PROD/.venv/bin/uvicorn" ||
     fail "production uvicorn missing"
 
-command -v systemctl >/dev/null 2>&1 ||
-    fail "systemctl missing"
-
-command -v curl >/dev/null 2>&1 ||
-    fail "curl missing"
-
+for cmd in \
+    systemctl \
+    curl \
+    python3 \
+    ip
+do
+    command -v "$cmd" >/dev/null 2>&1 ||
+        fail "required command missing: $cmd"
+done
 
 echo -n "production Python: "
 
@@ -293,22 +703,30 @@ sudo "$PROD/.venv/bin/python" --version ||
 
 
 if sudo test -d "$PROD_APP"; then
+
     HAD_HOST_APP=1
 
     echo "production host_app: EXISTS"
     echo "deployment mode: host_app update"
+
 else
+
     HAD_HOST_APP=0
 
     echo "production host_app: MISSING"
 
     if sudo test -d "$PROD/app"; then
+
         echo "legacy production app: EXISTS"
         echo "deployment mode: first app -> host_app migration"
+
     else
+
         fail \
             "neither $PROD/host_app nor $PROD/app exists"
+
     fi
+
 fi
 
 
@@ -319,15 +737,16 @@ fi
 echo
 echo "=== 3. Current systemd contract ==="
 
-
 UNIT_TEXT="$(
     systemctl cat --no-pager "$SERVICE" 2>"$LOG"
 )"
 RC=$?
 
 if [ "$RC" -ne 0 ]; then
+
     cat "$LOG"
     fail "cannot read $SERVICE"
+
 fi
 
 
@@ -336,12 +755,18 @@ if grep -Eq \
     <<<"$UNIT_TEXT"
 then
 
+    CURRENT_APP_KIND="host_app"
+    CURRENT_CONFIG="$PROD/host_app/config.py"
+
     echo "current systemd application: host_app.main:app"
 
 elif grep -Eq \
     '(^|[[:space:]=])app\.main:app([[:space:]]|$)' \
     <<<"$UNIT_TEXT"
 then
+
+    CURRENT_APP_KIND="app"
+    CURRENT_CONFIG="$PROD/app/config.py"
 
     echo "current systemd application: app.main:app"
     echo "migration required: YES"
@@ -356,17 +781,85 @@ else
 
 fi
 
+sudo test -f "$CURRENT_CONFIG" ||
+    fail "active production config missing: $CURRENT_CONFIG"
 
+echo "active production config = $CURRENT_CONFIG"
 echo "systemd source contract: PASS"
 
 
 ###############################################################################
-# 4. Production dependencies
+# 4. Preserve active OTA release state
 ###############################################################################
 
 echo
-echo "=== 4. Synchronize production dependencies ==="
+echo "=== 4. Preserve active OTA release state ==="
 
+snapshot_release_config "$CURRENT_CONFIG" ||
+    fail "cannot snapshot current active release configuration"
+
+echo "--- preserved release configuration ---"
+
+python3 - "$RELEASE_SNAPSHOT" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as f:
+    data = json.load(f)
+
+print("version       =", data["version"])
+print("build_id      =", data["build_id"])
+print("artifact_path =", data["artifact_path_line"])
+PY
+
+
+if ! PRE_MANIFEST_STATUS="$(
+    curl \
+        --noproxy '*' \
+        --silent \
+        --show-error \
+        --connect-timeout 2 \
+        --max-time 5 \
+        --output "$PRE_MANIFEST" \
+        --write-out '%{http_code}' \
+        http://127.0.0.1:8000/manifest.json
+)"; then
+
+    fail "cannot snapshot current runtime manifest"
+
+fi
+
+case "$PRE_MANIFEST_STATUS" in
+
+    200)
+        test -s "$PRE_MANIFEST" ||
+            fail "current manifest returned HTTP 200 with empty body"
+
+        echo "current runtime manifest HTTP 200: PASS"
+        cat "$PRE_MANIFEST"
+        echo
+        ;;
+
+    204)
+        echo "current runtime manifest HTTP 204: PASS"
+        ;;
+
+    *)
+        fail \
+            "current runtime manifest returned HTTP $PRE_MANIFEST_STATUS"
+        ;;
+
+esac
+
+echo "ACTIVE_RELEASE_SNAPSHOT=PASS"
+
+
+###############################################################################
+# 5. Production dependencies
+###############################################################################
+
+echo
+echo "=== 5. Synchronize production dependencies ==="
 
 run_quiet \
     "pip requirements sync" \
@@ -388,12 +881,11 @@ run_quiet \
 
 
 ###############################################################################
-# 5. Preflight using production interpreter
+# 6. Preflight using production interpreter
 ###############################################################################
 
 echo
-echo "=== 5. Production-interpreter preflight ==="
-
+echo "=== 6. Production-interpreter preflight ==="
 
 mkdir -p "$STAGE/host_app" ||
     fail "cannot create staged host_app"
@@ -404,9 +896,6 @@ cp -a \
     || fail "cannot copy host_app into preflight staging"
 
 
-#
-# Do not include local bytecode/cache.
-#
 find "$STAGE/host_app" \
     -type d \
     -name '__pycache__' \
@@ -423,6 +912,11 @@ find "$STAGE/host_app" \
     || true
 
 
+apply_release_snapshot_user \
+    "$STAGE/host_app/config.py" \
+    || fail "cannot inject active release into preflight config"
+
+
 chmod -R a+rX "$STAGE" ||
     fail "cannot make staged source readable"
 
@@ -430,27 +924,6 @@ chmod -R a+rX "$STAGE" ||
 : > "$LOG"
 
 
-#
-# IMPORTANT:
-#
-# Run Python with STAGE as the current working directory.
-#
-# Production systemd uses:
-#
-#   WorkingDirectory=/opt/edgeguard-ota
-#
-# and imports:
-#
-#   host_app.main
-#
-# Therefore this preflight intentionally reproduces the same layout:
-#
-#   $STAGE/
-#       host_app/
-#
-# We do NOT use PYTHONPATH here. This prevents the repository directory
-# /home/liu2004/work/EG_OTA from winning module resolution.
-#
 if (
     cd "$STAGE" || exit 1
 
@@ -461,10 +934,10 @@ if (
 ) >"$LOG" 2>&1 <<'PY'
 
 from pathlib import Path
-import os
 import sys
 
 import host_app
+import host_app.config
 import host_app.main
 import host_app.models
 
@@ -480,6 +953,7 @@ print("expected_app =", expected_app)
 
 modules = (
     host_app,
+    host_app.config,
     host_app.main,
     host_app.models,
 )
@@ -530,20 +1004,16 @@ else
 fi
 
 
-#
-# Preflight staging is no longer needed.
-#
 rm -rf "$STAGE"
 STAGE=""
 
 
 ###############################################################################
-# 6. Stage production host_app
+# 7. Stage production host_app
 ###############################################################################
 
 echo
-echo "=== 6. Stage production host_app ==="
-
+echo "=== 7. Stage production host_app ==="
 
 sudo rm -rf "$NEW_APP"
 
@@ -556,9 +1026,6 @@ run_quiet \
     || fail "cannot stage new host_app"
 
 
-#
-# Do not deploy developer bytecode/cache.
-#
 sudo find "$NEW_APP" \
     -type d \
     -name '__pycache__' \
@@ -576,6 +1043,11 @@ sudo find "$NEW_APP" \
     || true
 
 
+apply_release_snapshot_root \
+    "$NEW_APP/config.py" \
+    || fail "cannot preserve active release in staged production host_app"
+
+
 run_quiet \
     "normalize host_app ownership" \
     sudo chown -R root:root "$NEW_APP" \
@@ -583,28 +1055,22 @@ run_quiet \
 
 
 echo "production host_app staging: PASS"
+echo "active release injection: PASS"
 
 
 ###############################################################################
-# 7. Activate host_app source
+# 8. Activate host_app source
 ###############################################################################
 
 echo
-echo "=== 7. Activate host_app source ==="
+echo "=== 8. Activate host_app source ==="
 
 
 if [ "$HAD_HOST_APP" -eq 1 ]; then
 
-    #
-    # Only one backup is retained.
-    #
     sudo rm -rf "$PREVIOUS_APP" ||
         fail "cannot remove stale host_app.previous"
 
-
-    #
-    # -T makes destination semantics unambiguous.
-    #
     sudo mv -T \
         "$PROD_APP" \
         "$PREVIOUS_APP" \
@@ -621,27 +1087,40 @@ then
     if [ "$HAD_HOST_APP" -eq 1 ] &&
        sudo test -d "$PREVIOUS_APP"
     then
+
         sudo mv -T \
             "$PREVIOUS_APP" \
             "$PROD_APP" \
             || true
+
     fi
 
     fail "cannot activate new host_app"
+
 fi
 
 
 APP_SWITCHED=1
 
+
+verify_release_snapshot_root \
+    "$PROD_APP/config.py" \
+    || {
+        rollback
+        fail "active release metadata changed during host_app activation"
+    }
+
+
 echo "new production host_app: PASS"
+echo "active release config preserved: PASS"
 
 
 ###############################################################################
-# 8. systemd host_app switch
+# 9. Switch systemd to host_app.main:app
 ###############################################################################
 
 echo
-echo "=== 8. Switch systemd to host_app.main:app ==="
+echo "=== 9. Switch systemd to host_app.main:app ==="
 
 
 sudo install \
@@ -671,17 +1150,6 @@ else
 fi
 
 
-#
-# The original service currently contains:
-#
-# ExecStart=/opt/edgeguard-ota/.venv/bin/uvicorn \
-#     app.main:app \
-#     --host 0.0.0.0 \
-#     --port 8000 \
-#     --workers 1
-#
-# Reset ExecStart and replace it with the new package.
-#
 if ! sudo tee "$DROPIN" >/dev/null <<EOF
 [Service]
 ExecStart=
@@ -699,8 +1167,10 @@ DROPIN_CHANGED=1
 
 
 if ! sudo systemctl daemon-reload; then
+
     rollback
     fail "systemctl daemon-reload failed"
+
 fi
 
 
@@ -708,11 +1178,11 @@ echo "systemd host_app override: PASS"
 
 
 ###############################################################################
-# 9. Verify effective systemd config before restart
+# 10. Verify effective systemd configuration
 ###############################################################################
 
 echo
-echo "=== 9. Effective systemd configuration ==="
+echo "=== 10. Effective systemd configuration ==="
 
 
 EFFECTIVE_UNIT="$(
@@ -721,9 +1191,11 @@ EFFECTIVE_UNIT="$(
 RC=$?
 
 if [ "$RC" -ne 0 ]; then
+
     rollback
     cat "$LOG"
     fail "cannot read effective systemd unit"
+
 fi
 
 
@@ -742,11 +1214,11 @@ echo "effective host_app.main:app: PASS"
 
 
 ###############################################################################
-# 10. Restart server
+# 11. Restart server
 ###############################################################################
 
 echo
-echo "=== 10. Restart server ==="
+echo "=== 11. Restart server ==="
 
 
 : > "$LOG"
@@ -767,11 +1239,11 @@ echo "service restart: PASS"
 
 
 ###############################################################################
-# 11. Runtime HTTP verification
+# 12. Runtime HTTP + active-release preservation verification
 ###############################################################################
 
 echo
-echo "=== 11. Runtime verification ==="
+echo "=== 12. Runtime verification ==="
 
 
 READY=0
@@ -781,19 +1253,27 @@ do
 
     if systemctl is-active --quiet "$SERVICE"; then
 
-        if curl \
-            --noproxy '*' \
-            --silent \
-            --show-error \
-            --fail \
-            --connect-timeout 2 \
-            --max-time 5 \
-            http://127.0.0.1:8000/manifest.json \
-            -o /dev/null \
-            2>"$LOG"
+        if RUNTIME_MANIFEST_STATUS="$(
+            curl \
+                --noproxy '*' \
+                --silent \
+                --show-error \
+                --connect-timeout 2 \
+                --max-time 5 \
+                --output "$RUNTIME_MANIFEST" \
+                --write-out '%{http_code}' \
+                http://127.0.0.1:8000/manifest.json \
+                2>"$LOG"
+        )"
         then
-            READY=1
-            break
+
+            case "$RUNTIME_MANIFEST_STATUS" in
+                200|204)
+                    READY=1
+                    break
+                    ;;
+            esac
+
         fi
 
     fi
@@ -837,14 +1317,31 @@ fi
 echo "$SERVICE active: PASS"
 echo "HTTP /manifest.json: PASS"
 
+
+if ! verify_manifest_preserved; then
+
+    echo
+    echo "Active OTA manifest changed during deployment."
+
+    rollback
+
+    fail "host_app deployment mutated active OTA release"
+
+fi
+
+
+echo "active OTA manifest preserved: PASS"
+
+
 ###############################################################################
-# 12. Laboratory endpoint verification
+# 13. Laboratory endpoint verification
 ###############################################################################
 
 echo
-echo "=== 12. Laboratory endpoint verification ==="
+echo "=== 13. Laboratory endpoint verification ==="
 
-LAB_IP="${EDGEGUARD_SERVER_IP:-10.52.46.50}"
+
+LAB_IP="${EDGEGUARD_SERVER_IP:-192.168.77.1}"
 
 
 if ip -4 -o addr show \
@@ -865,11 +1362,8 @@ else
     ip -4 -br addr || true
 
     #
-    # 注意：
-    # 此处不 rollback host_app。
-    #
-    # IP 不存在是网络环境问题，
-    # 并不意味着新 Server 程序本身部署失败。
+    # Network identity is an environment issue.
+    # Do not roll back a successfully validated host_app deployment.
     #
     fail "laboratory server IP unavailable"
 
@@ -899,12 +1393,13 @@ else
 
 fi
 
+
 ###############################################################################
-# 13. Verify systemd runtime command
+# 14. Verify systemd runtime command
 ###############################################################################
 
 echo
-echo "=== 12. Runtime command provenance ==="
+echo "=== 14. Runtime command provenance ==="
 
 
 RUNTIME_EXEC="$(
@@ -942,6 +1437,24 @@ echo "============================================================"
 
 echo "production source = $PROD_APP"
 echo "systemd entry     = host_app.main:app"
+
+echo
+echo "Active OTA release:"
+python3 - "$RELEASE_SNAPSHOT" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as f:
+    data = json.load(f)
+
+print("  version  =", data["version"])
+print("  build_id =", data["build_id"])
+PY
+
+echo
+echo "Active release preservation:"
+echo "  config.py = PASS"
+echo "  manifest  = PASS"
 
 if [ "$HAD_HOST_APP" -eq 0 ]; then
 
