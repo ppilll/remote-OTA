@@ -1,0 +1,107 @@
+#!/bin/sh
+# BusyBox/SysV. Service ordering is a hint; the daemon handles late D-Bus,
+# BlueZ and ConnMan ownership without requiring a board restart.
+DAEMON=/usr/bin/edgeguard-provisioningd
+CONFIG=/etc/edgeguard-provisioning/daemon.conf
+PIDFILE=/var/run/edgeguard-provisioning.pid
+PATH=/sbin:/usr/sbin:/bin:/usr/bin
+export PATH
+umask 077
+
+running()
+{
+    start-stop-daemon -K -t -q -p "$PIDFILE" -x "$DAEMON"
+}
+
+load_config()
+{
+    KEY_CODE=
+    HOLD_MS=
+    ONE_SHOT=0
+    [ -r "$CONFIG" ] || return 1
+    while IFS='=' read -r key value; do
+        case "$key" in
+            ''|'#'*) continue ;;
+            KEY_CODE) KEY_CODE=$value ;;
+            HOLD_MS) HOLD_MS=$value ;;
+            ONE_SHOT) ONE_SHOT=$value ;;
+            *) echo "edgeguard-provisioning: unsupported config key" >&2; return 1 ;;
+        esac
+    done < "$CONFIG"
+    case "$ONE_SHOT" in 0|1) ;; *) return 1 ;; esac
+    case "$KEY_CODE:$HOLD_MS" in
+        :) ;;
+        *[!0-9:]*|:*|*:) return 1 ;;
+        *)
+            [ "$KEY_CODE" -gt 0 ] 2>/dev/null || return 1
+            [ "$KEY_CODE" -le 767 ] 2>/dev/null || return 1
+            [ "$HOLD_MS" -ge 500 ] 2>/dev/null || return 1
+            [ "$HOLD_MS" -le 10000 ] 2>/dev/null || return 1
+            ;;
+    esac
+    return 0
+}
+
+userdata_ready()
+{
+    while read -r device mountpoint fstype options dump pass; do
+        if [ "$mountpoint" = /userdata ]; then
+            [ -w /userdata ]
+            return
+        fi
+    done < /proc/mounts
+    return 1
+}
+
+start()
+{
+    if running; then return 0; fi
+    [ -x "$DAEMON" ] && load_config || return 1
+    userdata_ready || {
+        echo 'edgeguard-provisioning: persistent /userdata is unavailable' >&2
+        return 1
+    }
+    [ ! -L /userdata/edgeguard-provisioning ] || return 1
+    mkdir -p /userdata/edgeguard-provisioning || return 1
+    [ -d /userdata/edgeguard-provisioning ] || return 1
+    chown 0:0 /userdata/edgeguard-provisioning || return 1
+    chmod 0700 /userdata/edgeguard-provisioning || return 1
+
+    if [ -n "$KEY_CODE" ]; then
+        if [ "$ONE_SHOT" -eq 1 ]; then
+            start-stop-daemon -S -q -b -m -p "$PIDFILE" -x "$DAEMON" -- \
+                --key-code "$KEY_CODE" --hold-ms "$HOLD_MS" --one-shot
+        else
+            start-stop-daemon -S -q -b -m -p "$PIDFILE" -x "$DAEMON" -- \
+                --key-code "$KEY_CODE" --hold-ms "$HOLD_MS"
+        fi
+    elif [ "$ONE_SHOT" -eq 1 ]; then
+        start-stop-daemon -S -q -b -m -p "$PIDFILE" -x "$DAEMON" -- --one-shot
+    else
+        start-stop-daemon -S -q -b -m -p "$PIDFILE" -x "$DAEMON"
+    fi
+}
+
+stop()
+{
+    if ! running; then return 0; fi
+    start-stop-daemon -K -q -p "$PIDFILE" -x "$DAEMON" -s TERM || return 1
+    remaining=35
+    while running && [ "$remaining" -gt 0 ]; do
+        sleep 1
+        remaining=$((remaining - 1))
+    done
+    if running; then
+        echo 'edgeguard-provisioning: still stopping; no forced kill performed' >&2
+        return 1
+    fi
+    rm -f "$PIDFILE"
+}
+
+case "${1-}" in
+    start) start ;;
+    stop) stop ;;
+    restart) stop && start ;;
+    status) running ;;
+    *) echo "Usage: $0 {start|stop|restart|status}" >&2; exit 2 ;;
+esac

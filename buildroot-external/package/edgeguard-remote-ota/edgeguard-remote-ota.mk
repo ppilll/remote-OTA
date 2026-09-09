@@ -9,6 +9,7 @@ EDGEGUARD_REMOTE_OTA_SITE = $(BR2_EXTERNAL_EDGEGUARD_PATH)/../RK3588_app/edgegua
 EDGEGUARD_REMOTE_OTA_SITE_METHOD = local
 EDGEGUARD_REMOTE_OTA_DEPENDENCIES = host-pkgconf host-python3 libcurl libglib2 json-glib rauc edgeguard-rk-ab
 EDGEGUARD_REMOTE_OTA_PACKAGE_DIR = $(BR2_EXTERNAL_EDGEGUARD_PATH)/package/edgeguard-remote-ota
+EDGEGUARD_REMOTE_OTA_PROVISIONING_SOURCE = $(BR2_EXTERNAL_EDGEGUARD_PATH)/../RK3588_app/edgeguard-provisioningd
 EDGEGUARD_REMOTE_OTA_RELEASE_FILE = $(call qstrip,$(BR2_PACKAGE_EDGEGUARD_REMOTE_OTA_RELEASE_FILE))
 EDGEGUARD_REMOTE_OTA_PKG_CONFIG = PKG_CONFIG_SYSROOT_DIR="$(STAGING_DIR)" PKG_CONFIG_LIBDIR="$(STAGING_DIR)/usr/lib/pkgconfig:$(STAGING_DIR)/usr/share/pkgconfig" $(PKG_CONFIG_HOST_BINARY)
 
@@ -16,9 +17,11 @@ define EDGEGUARD_REMOTE_OTA_BUILD_CMDS
 	$(HOST_DIR)/bin/python3 $(EDGEGUARD_REMOTE_OTA_PACKAGE_DIR)/prepare-release.py \
 		--input "$(EDGEGUARD_REMOTE_OTA_RELEASE_FILE)" --output $(@D)/release.json
 	$(TARGET_CC) $(TARGET_CFLAGS) -std=gnu11 -Wall -Wextra \
-		-I$(@D)/include \
+		-I$(@D)/include -I$(EDGEGUARD_REMOTE_OTA_PROVISIONING_SOURCE)/include \
 		`$(EDGEGUARD_REMOTE_OTA_PKG_CONFIG) --cflags glib-2.0 json-glib-1.0 libcurl` \
-		$(@D)/src/main.c $(@D)/src/services.c $(@D)/src/artifact.c \
+		$(@D)/src/main.c $(@D)/src/control.c $(@D)/src/runtime_endpoint.c \
+		$(EDGEGUARD_REMOTE_OTA_PROVISIONING_SOURCE)/src/endpoint.c \
+		$(@D)/src/services.c $(@D)/src/artifact.c \
 		$(@D)/src/config.c $(@D)/src/identity.c \
 		$(@D)/src/manifest.c $(@D)/src/version.c $(@D)/src/compatibility.c \
 		$(@D)/src/download.c $(@D)/src/persistence.c $(@D)/src/rauc_adapter.c \

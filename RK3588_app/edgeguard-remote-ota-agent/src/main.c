@@ -1,5 +1,7 @@
 #include "edgeguard_ota/state_machine.h"
+#include "edgeguard_ota/control.h"
 #include "edgeguard_ota/identity.h"
+#include "edgeguard_ota/runtime_endpoint.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
@@ -9,7 +11,13 @@
 #include <unistd.h>
 
 static volatile sig_atomic_t stopping;
-static void stop_requested(int signal_number) { (void)signal_number; stopping = 1; }
+static OtaControl *signal_control;
+static void stop_requested(int signal_number)
+{
+    (void)signal_number;
+    stopping = 1;
+    ota_control_signal_wakeup(signal_control);
+}
 
 #ifdef OTA_TEST_WEAK_SERVICES
 __attribute__((weak))
@@ -36,7 +44,7 @@ static int acquire_lock(const char *directory, OtaError *error)
     return fd;
 }
 
-static gboolean poll_wait(const OtaTimeSource *time, uint32_t seconds, OtaError *error)
+static gboolean retry_wait(const OtaTimeSource *time, uint32_t seconds, OtaError *error)
 {
     uint64_t deadline;
     if (!ota_deadline_after(time, (uint64_t)seconds * 1000, &deadline, error)) return FALSE;
@@ -61,22 +69,53 @@ static gboolean phase_may_retry(OtaState state)
            state == OTA_STATE_ROLLBACK;
 }
 
+static gboolean refresh_cycle_config(const OtaConfig *immutable_config,
+                                     OtaConfig *cycle_config, OtaError *error)
+{
+    OtaError diagnostic = {0};
+    gboolean override_active = FALSE;
+    if (!ota_runtime_endpoint_refresh(immutable_config, cycle_config,
+                                      &override_active, &diagnostic)) {
+        *error = diagnostic;
+        return FALSE;
+    }
+    if (diagnostic.code != OTA_ERROR_NONE)
+        g_printerr("%s: %s\n", ota_error_code_name(diagnostic.code),
+                   diagnostic.message);
+    (void)override_active;
+    return TRUE;
+}
+
 /* This skeleton owns ordering and durability. Service callbacks own the frozen
  * HTTP/version/download/RAUC/health/report operations, with typed results. */
 static int run(OtaStateMachine *machine, const OtaConfig *config,
                const OtaRelease *release, const char *device_id,
-               OtaAgentServices *services, OtaError *error)
+               OtaAgentServices *services, OtaControl *control, OtaError *error)
 {
     gboolean first_poll = TRUE;
+    OtaConfig cycle_config = *config;
+    /* A non-IDLE restart resumes the durable cycle. Provisioning mutations are
+     * fail-closed outside IDLE, so the current override reconstructs the same
+     * cycle-local endpoint without widening persistent Agent state. */
+    if (machine->current.state != OTA_STATE_IDLE &&
+        !refresh_cycle_config(config, &cycle_config, error))
+        return 1;
     while (!stopping) {
         OtaState state = machine->current.state;
         if (state == OTA_STATE_REBOOT_PENDING)
             return ota_state_machine_reboot(machine, &services->reboot, error) ? 0 : 1;
         OtaPersistentState next = machine->current;
         if (state == OTA_STATE_IDLE) {
-            if (!first_poll && !poll_wait(&services->time, config->poll_interval_sec, error)) return 1;
+            gboolean requested = FALSE;
+            if (!first_poll &&
+                !ota_control_idle_wait(control, config->poll_interval_sec,
+                                       &stopping, &requested, error))
+                return 1;
             if (stopping) break;
             first_poll = FALSE;
+            if (!refresh_cycle_config(config, &cycle_config, error))
+                return 1;
+            (void)requested;
             next.state = OTA_STATE_CHECK_NETWORK;
         } else {
             OtaError phase_error = {0};
@@ -91,7 +130,7 @@ static int run(OtaStateMachine *machine, const OtaConfig *config,
                     continue;
                 }
             }
-            OtaPhaseResult phase_result = services->phase(services->user, config, release,
+            OtaPhaseResult phase_result = services->phase(services->user, &cycle_config, release,
                                                           device_id, &machine->current,
                                                           &next, &phase_error);
             if (phase_result == OTA_PHASE_RETRY) {
@@ -100,7 +139,7 @@ static int run(OtaStateMachine *machine, const OtaConfig *config,
                                   "State %s is not replay-safe", ota_state_name(state));
                     phase_result = OTA_PHASE_HARD_FAILURE;
                 } else {
-                    if (!poll_wait(&services->time, config->poll_interval_sec, error)) return 1;
+                    if (!retry_wait(&services->time, config->poll_interval_sec, error)) return 1;
                     continue;
                 }
             }
@@ -168,6 +207,7 @@ int main(int argc, char **argv)
     OtaRelease release = {0};
     OtaAgentServices services = {0};
     OtaStateMachine machine;
+    OtaControl *control = NULL;
     char device_id[OTA_UUID_CAP], boot_id[OTA_UUID_CAP];
     char *state_path = NULL;
     int lock = -1, result = 1;
@@ -215,9 +255,13 @@ int main(int argc, char **argv)
     sigemptyset(&action.sa_mask);
     sigaction(SIGINT, &action, NULL);
     sigaction(SIGTERM, &action, NULL);
-    result = run(&machine, &config, &release, device_id, &services, &error);
+    if (!ota_control_open(&control, &error)) goto done;
+    signal_control = control;
+    result = run(&machine, &config, &release, device_id, &services, control, &error);
     if (result == 2 && machine.current.last_error.code != OTA_ERROR_NONE) error = machine.current.last_error;
 done:
+    signal_control = NULL;
+    ota_control_close(control);
     if (result && error.code != OTA_ERROR_NONE)
         g_printerr("%s: %s\n", ota_error_code_name(error.code), error.message);
     if (lock >= 0) close(lock);
