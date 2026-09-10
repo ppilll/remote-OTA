@@ -89,6 +89,12 @@ gboolean egp_protocol_cache_result_id(EgpProtocol *protocol,
                                       const char *result_json, gint64 now_us,
                                       EgpError *error);
 void egp_transaction_id_format(const guint8 id[16], char output[37]);
+/* Derives the canonical UUID-text Agent idempotence key from the complete
+ * request scope. daemon_session_id is a fresh UUID generated once per daemon
+ * process, so a restart cannot reuse a prior Agent cache identity. */
+gboolean egp_protocol_scoped_request_id(const char *daemon_session_id,
+                                        const EgpProtocolRequest *request,
+                                        char output[37], EgpError *error);
 const char *egp_opcode_name(guint8 opcode);
 
 G_END_DECLS

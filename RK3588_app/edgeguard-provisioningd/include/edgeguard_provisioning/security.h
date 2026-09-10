@@ -12,8 +12,9 @@ typedef struct {
     gboolean paired;
     gboolean bonded;
     gboolean stable_identity;
-    /* True only when the call arrived through a BlueZ characteristic whose
-     * exported flag requires link encryption. */
+    /* Call-site evidence that the initial request arrived through a BlueZ
+     * characteristic whose exported flag requires link encryption. This is
+     * not a later, independent measurement of controller link state. */
     gboolean encrypted_transport;
     /* Changes whenever BlueZ ownership or this peer's connection/security
      * properties change. Zero is never a valid accepted-write epoch. */

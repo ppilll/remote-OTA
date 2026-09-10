@@ -24,6 +24,7 @@ Every campaign records target release/build, current/primary/last_boot slot, mon
 3. Observe atomic store generation, derived ConnMan profile, `Immutable/Favorite/AutoConnect=true`, association, address DHCP/IP/route, and optional server reachability.
 4. Do not use manual secret entry, `connmanctl connect`, `wpa_cli`, or manual profile copying as a repair.
 5. Reboot without re-entering the credential. Prove canonical load, derived-file reconstruction, automatic reconnection, IP, and reachability.
+   Repeat with the Agent intentionally observed in representative post-boot obligation states (`BOOT_NEW_SLOT`, `HEALTH_CHECK`, `MARK_GOOD`, or `REPORT_SUCCESS`) and prove reconciliation is not blocked on stable `IDLE`.
 6. Replace with a known alternate credential and verify success/rollback semantics; test wrong PSK without losing the prior working configuration.
 7. Run `FORGET_WIFI`; prove canonical and owned derived profile are gone, property state revokes, and Agent/A-B state is unchanged.
 
@@ -45,11 +46,15 @@ After automatic boot into the candidate, prove `/userdata` retained the canonica
 ## Campaign 5 — status/control/concurrency
 
 - compare BLE release/build, Agent state, attempt ID, error, and slot with authoritative read-only sources;
+- prove RuntimeStatus is readable only through the paired/bonded/connected `encrypt-read` gate and is polled without notify registration or `PropertiesChanged(Value)`;
+- prove OperationResult is owner-only encrypted read/poll with its existing UUID and no notify surface;
 - send `CHECK_UPDATE_NOW` in `IDLE`; prove the existing check path and normal no-update return;
+- repeat one logical `CHECK_UPDATE_NOW` and correlate the same Agent `request_id`; reuse the txid in a reopened window and from another peer and correlate distinct IDs; use a distinct txid and correlate another distinct ID; restart only the provisioning daemon in a dedicated negative setup and prove the reopened session does not alias the Agent's prior ten-minute cache;
 - prove there is no direct RAUC, reboot, bundle URL, or boot-control action;
 - for every matrix row, host-verify the decision; on target, safely sample busy/critical states such as `DOWNLOADING` and `INSTALLING` only within an approved OTA campaign;
 - prove mutations and duplicate checks return busy/rejected without changing persistent provisioning or disturbing the attempt;
-- disconnect mid-fragment and mid-RuntimeStatus notification; prove only complete committed transactions survive and OperationResult remains owner-read-only.
+- disconnect mid-fragment and prove only complete committed transactions survive.
+- between accepted write and commit, inject disconnect/reconnect, window close/reopen, `bluetoothd` owner restart, and pairing/bond/security-property changes in separate cases; each must fail closed. Record epoch/property evidence and do not describe this as an independent commit-time link-encryption measurement.
 
 ## Verdict boundary
 

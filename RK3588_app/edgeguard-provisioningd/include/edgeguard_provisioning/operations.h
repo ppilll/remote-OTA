@@ -31,7 +31,8 @@ gboolean egp_operations_submit(EgpOperations *operations,
                                EgpError *error);
 gboolean egp_operations_busy(EgpOperations *operations);
 
-typedef void (*EgpReconcileCompleted)(gpointer user_data, EgpErrorCode code);
+typedef void (*EgpReconcileCompleted)(gpointer user_data, EgpErrorCode code,
+                                      gboolean retryable);
 gboolean egp_operations_reconcile(EgpOperations *operations,
                                   EgpReconcileCompleted completed,
                                   gpointer completed_data,

@@ -12,7 +12,7 @@ R5 claims filesystem permission protection only. Unless the target later proves 
 
 - accept a secret only in an authorized complete `SET_WIFI` transaction;
 - bound all fragments and the reassembled object before parsing;
-- never echo the raw payload in D-Bus errors, IPC, notifications, or diagnostics;
+- never echo the raw payload in D-Bus errors, IPC, read responses, or diagnostics;
 - keep old/new credentials only as long as required for atomic replacement/recovery;
 - clear mutable secret buffers before free where the compiler/runtime permits, while acknowledging copies inside GLib/JSON libraries may not be provably erased;
 - disable core dumps for the daemon when supported by target policy;

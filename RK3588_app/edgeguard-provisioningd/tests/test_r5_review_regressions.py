@@ -14,17 +14,25 @@ def source(root, relative):
     return (root / relative).read_text(encoding="utf-8")
 
 
-def test_connman_owner_reappearance_has_bounded_serialized_reconciliation():
+def test_connman_owner_reappearance_has_continuous_capped_reconciliation():
     main = source(PROVISIONING, "src/main.c")
     operations = source(PROVISIONING, "src/operations.c")
     assert 'g_bus_watch_name_on_connection(' in main
     assert '"net.connman"' in main
-    assert "CONNMAN_RECONCILE_MAX_ATTEMPTS 6u" in main
+    assert "CONNMAN_RECONCILE_MAX_ATTEMPTS" not in main
     assert "egp_connman_retry_delay_ms" in main
     assert "egp_operations_reconcile" in main
     assert "egp_operations_connman_lost" in main
+    assert "if (retryable)" in main
+    assert "error.retryable" in main
     assert "reconcile_canonical" in operations
     assert "g_cancellable_cancel" in operations
+    reconcile = operations[operations.index("static void reconcile_canonical"):
+                           operations.index("static void worker")]
+    assert "stable_idle" not in reconcile
+    mutation_gate = operations[operations.index("static gboolean authorize_and_idle"):
+                               operations.index("static void set_success")]
+    assert "stable_idle" in mutation_gate
 
 
 def test_forget_requires_fixed_profile_and_unique_owned_service():
@@ -40,17 +48,19 @@ def test_forget_requires_fixed_profile_and_unique_owned_service():
     assert '"Remove"' not in revoke and '"Disconnect"' not in revoke
 
 
-def test_operation_result_is_owner_read_only_on_bluez_577():
+def test_runtime_and_operation_result_are_encrypted_read_only():
     bluez = source(PROVISIONING, "src/bluez.c")
     docs = source(REPO, "docs/R5/03_GATT_SPEC.md")
     assert 'static const char *const result[] = { "encrypt-read", NULL };' in bluez
-    assert "notify_characteristic =\n        export->characteristic == EGP_BLUEZ_RUNTIME_STATUS" in bluez
-    assert "characteristic == EGP_BLUEZ_OPERATION_RESULT)\n        return;" in bluez
+    assert 'static const char *const status[] = { "encrypt-read", NULL };' in bluez
     assert "Only the active BlueZ owner may invoke this object" in bluez
-    assert "StartNotify" in docs
-    assert "carry no device identity" in docs
-    operation_flags = docs.split("| OperationResult |", 1)[1].splitlines()[0]
-    assert "notify" not in operation_flags
+    for removed_surface in ("StartNotify", "StopNotify", "Notifying",
+                            '"notify"', '"Value"', "egp_bluez_publish"):
+        assert removed_surface not in bluez
+    for characteristic in ("RuntimeStatus", "OperationResult"):
+        flags = docs.split(f"| {characteristic} |", 1)[1].splitlines()[0]
+        assert "notify" not in flags
+        assert "encrypt-read" in flags
 
 
 def test_window_epoch_change_drops_stale_transactions_and_results():
@@ -77,6 +87,9 @@ def test_commit_binds_window_and_connection_security_epochs():
     assert "bump_peer_epoch" in bluez
     for property_name in ('"Connected"', '"Paired"', '"Bonded"'):
         assert property_name in bluez
+    assert "Address" in bluez and "AddressType" in bluez
+    assert "peer->encrypted_transport = encrypted_gatt_gate" in bluez
+    assert "peer_currently_eligible(peer, error)" in security
     assert "work->request.window_epoch" in operations
     assert "output.request.connection_epoch = peer.connection_epoch" in main
     commit_gate = operations[operations.index("static gboolean authorize_and_idle"):
@@ -84,13 +97,22 @@ def test_commit_binds_window_and_connection_security_epochs():
     assert commit_gate.index("stable_idle") < commit_gate.index("authorize_commit")
 
 
-def test_gatt_transaction_to_ipc_uuid_is_injective_and_agent_accepts_it():
+def test_gatt_transaction_to_ipc_uuid_is_scoped_and_agent_accepts_it():
     status = source(PROVISIONING, "src/status.c")
+    protocol = source(PROVISIONING, "src/protocol.c")
+    protocol_test = source(PROVISIONING, "tests/test_protocol.c")
     control = source(AGENT, "src/control.c")
-    mapper = status[status.index("static void ipc_request_id"):
-                    status.index("gboolean egp_status_check_update_now")]
-    assert "egp_transaction_id_format(transaction_id, output)" in mapper
-    assert "id[6]" not in mapper and "id[8]" not in mapper
+    assert "g_uuid_string_random" in status
+    assert "egp_protocol_scoped_request_id" in status
+    for scope in ("daemon_session_id", "window_epoch", "peer_path",
+                  "connection_epoch", "characteristic", "opcode",
+                  "transaction_id"):
+        assert scope in protocol
+    for relation in ("g_assert_cmpstr(first, ==, retry)",
+                     "changed.window_epoch++", "changed.connection_epoch++",
+                     "dev_BB",
+                     "changed.transaction_id[0]", "session_b"):
+        assert relation in protocol_test
     assert "ota_uuid_valid(request_id, FALSE)" in control
     assert "ota_uuid_valid(request_id, TRUE)" not in control
 

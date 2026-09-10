@@ -40,7 +40,7 @@ Response examples:
 {"version":1,"request_id":"b0cb1b28-94cb-4c03-8e4c-f52fc1294199","status":"REJECTED","error":"AGENT_BUSY"}
 ```
 
-`request_id` is canonical UUID text and provides idempotence during a bounded in-memory cache. It is the injective textual formatting of the opaque 128-bit GATT transaction ID; v1 does not require UUIDv4 version bits because forcing those bits would create deterministic collisions. No request carries a URL, bundle, slot, shell string, credential, or arbitrary argument.
+`request_id` is canonical UUID text and provides idempotence during a bounded in-memory cache. It is a domain-separated SHA-256-derived identity, formatted from 128 digest bits without forcing UUIDv4 bits. The canonical input framing includes a fresh per-daemon-process session UUID, provisioning window epoch, peer connection/security epoch, BlueZ peer object path, writable characteristic, command opcode, and all 128 bits of the GATT transaction ID. The same logical request retry in one daemon/window/connection scope produces the same value; a new window or connection/security epoch, different peer, different characteristic/command, different txid, or daemon restart produces a separately scoped value. The fresh daemon session UUID prevents a post-restart window counter from aliasing an entry in the Agent's existing ten-minute cache. No request carries a URL, bundle, slot, shell string, credential, or arbitrary argument, and the IPC command surface is unchanged.
 
 ## Command semantics
 

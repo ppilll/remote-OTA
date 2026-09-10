@@ -23,9 +23,10 @@ Use a known fixture passphrase such as `R5-Secret-Fixture-Do-Not-Log` only in is
 - deterministic key-file generation and escaping;
 - no shell construction;
 - create/replace/remove only the owned derived path;
-- mocked D-Bus service discovery, association transitions, timeout, authentication failure, owner loss/reappearance, and backoff;
+- mocked D-Bus service discovery, association transitions, timeout, authentication failure, owner loss/reappearance, and continuous capped backoff beyond the former finite-attempt boundary;
 - unrelated ConnMan service data is never deleted;
 - canonical credential survives derived-file loss.
+- startup/recovery reconciliation succeeds without stable Agent `IDLE`, including representative post-boot obligation states, while new BLE Wi-Fi mutations still require stable `IDLE`.
 
 ### BLE protocol and security
 
@@ -35,11 +36,14 @@ Use a known fixture passphrase such as `R5-Secret-Fixture-Do-Not-Log` only in is
 - completed transaction replay and conflicting duplicate ID;
 - unpaired, encrypted-but-unbonded, bonded but window-closed, authorized/window-open, revoked bond, and wrong peer result access;
 - window monotonic timeout, input loss, close cleanup, BlueZ owner loss/re-registration;
+- commit rejection after disconnect/reconnect, window close/reopen, BlueZ owner restart, and pairing/bond/security-property epoch changes; verify the code does not claim an independent commit-time encryption measurement;
 - advertising content contains only approved name and service UUID.
+- RuntimeStatus and OperationResult expose only their frozen encrypted read/poll surfaces: no notify flag, methods, state, public `Value`, or `PropertiesChanged(Value)`.
 
 ### IPC and Agent integration
 
 - socket mode, peer-credential rejection, length bounds, unknown fields/commands, timeouts, client limits, duplicate request IDs;
+- scoped request identity behavior: identical logical retry is equal; same txid in a new window differs; same txid from a different peer differs; distinct txids differ; daemon-session restart scope differs;
 - `CHECK_UPDATE_NOW` wakes only the idle poll and follows existing state transitions;
 - busy/critical states and duplicate requests return busy without creating an unbounded queue;
 - endpoint override reloads immediately before each `IDLE` cycle and remains fixed through that cycle;

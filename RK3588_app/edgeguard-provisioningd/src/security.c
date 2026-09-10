@@ -29,7 +29,7 @@ static gboolean deny(EgpError *error, EgpErrorCode code, const char *message)
 static gboolean expiry_tick(gpointer user_data)
 {
     EgpSecurity *security = user_data;
-    gboolean notify = FALSE;
+    gboolean emit_change = FALSE;
     g_mutex_lock(&security->lock);
     if (!security->open) {
         security->expiry_source = 0;
@@ -42,12 +42,12 @@ static gboolean expiry_tick(gpointer user_data)
         advance_epoch(security);
         memset(security->owner, 0, sizeof(security->owner));
         security->expiry_source = 0;
-        notify = TRUE;
+        emit_change = TRUE;
     }
     g_mutex_unlock(&security->lock);
-    if (notify && security->changed)
+    if (emit_change && security->changed)
         security->changed(security->user_data, FALSE);
-    return notify ? G_SOURCE_REMOVE : G_SOURCE_CONTINUE;
+    return emit_change ? G_SOURCE_REMOVE : G_SOURCE_CONTINUE;
 }
 
 EgpSecurity *egp_security_new(EgpWindowChanged changed, gpointer user_data)
@@ -90,12 +90,12 @@ void egp_security_close_window(EgpSecurity *security)
 {
     if (!security)
         return;
-    gboolean notify;
+    gboolean emit_change;
     g_mutex_lock(&security->lock);
-    notify = security->open || security->owner[0];
+    emit_change = security->open || security->owner[0];
     security->open = FALSE;
     security->deadline_us = 0;
-    if (notify)
+    if (emit_change)
         advance_epoch(security);
     memset(security->owner, 0, sizeof(security->owner));
     guint source = security->expiry_source;
@@ -103,7 +103,7 @@ void egp_security_close_window(EgpSecurity *security)
     g_mutex_unlock(&security->lock);
     if (source)
         g_source_remove(source);
-    if (notify && security->changed)
+    if (emit_change && security->changed)
         security->changed(security->user_data, FALSE);
 }
 
@@ -165,18 +165,25 @@ gboolean egp_security_allow_pairing(EgpSecurity *security,
     return TRUE;
 }
 
-static gboolean peer_eligible(const EgpPeerSecurity *peer, EgpError *error)
+static gboolean peer_currently_eligible(const EgpPeerSecurity *peer,
+                                        EgpError *error)
 {
-    if (!peer || !peer->encrypted_transport)
-        return deny(error, EGP_ERROR_BLE_UNAUTHORIZED,
-                    "Encrypted GATT transport is required");
-    if (!peer->paired || !peer->bonded)
+    if (!peer || !peer->paired || !peer->bonded)
         return deny(error, EGP_ERROR_BLE_NOT_PAIRED,
                     "A paired and bonded peer is required");
     if (!peer->connected || !peer->stable_identity)
         return deny(error, EGP_ERROR_BLE_UNAUTHORIZED,
                     "Stable connected peer identity is required");
     return TRUE;
+}
+
+static gboolean peer_initially_eligible(const EgpPeerSecurity *peer,
+                                        EgpError *error)
+{
+    if (!peer || !peer->encrypted_transport)
+        return deny(error, EGP_ERROR_BLE_UNAUTHORIZED,
+                    "Encrypted GATT transport is required");
+    return peer_currently_eligible(peer, error);
 }
 
 gboolean egp_security_authorize_sensitive(EgpSecurity *security,
@@ -186,7 +193,7 @@ gboolean egp_security_authorize_sensitive(EgpSecurity *security,
                                           gint64 now_us, EgpError *error)
 {
     if (!security || !peer_path || !g_variant_is_object_path(peer_path) ||
-        !peer_eligible(peer, error))
+        !peer_initially_eligible(peer, error))
         return FALSE;
     g_mutex_lock(&security->lock);
     gboolean open = security->open && now_us > 0 && now_us < security->deadline_us;
@@ -219,7 +226,7 @@ gboolean egp_security_authorize_commit(EgpSecurity *security,
 {
     if (!security || !peer_path || !g_variant_is_object_path(peer_path) ||
         !expected_window_epoch || !expected_connection_epoch ||
-        !peer_eligible(peer, error))
+        !peer_currently_eligible(peer, error))
         return FALSE;
     if (peer->connection_epoch != expected_connection_epoch)
         return deny(error, EGP_ERROR_BLE_UNAUTHORIZED,
@@ -245,7 +252,7 @@ gboolean egp_security_can_read_runtime(EgpSecurity *security,
                                        EgpError *error)
 {
     (void)security;
-    if (!peer_eligible(peer, error))
+    if (!peer_initially_eligible(peer, error))
         return FALSE;
     egp_error_clear(error);
     return TRUE;

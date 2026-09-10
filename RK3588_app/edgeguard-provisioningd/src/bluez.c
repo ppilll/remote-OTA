@@ -49,8 +49,6 @@ struct _EgpBluez {
     gboolean agent_registered;
     char unique_owner[64];
     char adapter_path[EGP_DBUS_PATH_CAP];
-    gboolean notifying[5];
-    GBytes *values[5];
 };
 
 static const char manager_xml[] =
@@ -69,10 +67,8 @@ static const char characteristic_xml[] =
     "<node><interface name='org.bluez.GattCharacteristic1'>"
     "<method name='ReadValue'><arg name='options' type='a{sv}' direction='in'/><arg name='value' type='ay' direction='out'/></method>"
     "<method name='WriteValue'><arg name='value' type='ay' direction='in'/><arg name='options' type='a{sv}' direction='in'/></method>"
-    "<method name='StartNotify'/><method name='StopNotify'/>"
     "<property name='UUID' type='s' access='read'/><property name='Service' type='o' access='read'/>"
-    "<property name='Flags' type='as' access='read'/><property name='Notifying' type='b' access='read'/>"
-    "<property name='Value' type='ay' access='read'/></interface></node>";
+    "<property name='Flags' type='as' access='read'/></interface></node>";
 
 static const char advertisement_xml[] =
     "<node><interface name='org.bluez.LEAdvertisement1'>"
@@ -123,7 +119,7 @@ static GVariant *string_array(const char *const *strings)
 static GVariant *characteristic_flags(EgpBluezCharacteristic characteristic)
 {
     static const char *const device_info[] = { "read", NULL };
-    static const char *const status[] = { "encrypt-read", "notify", NULL };
+    static const char *const status[] = { "encrypt-read", NULL };
     static const char *const result[] = { "encrypt-read", NULL };
     static const char *const request[] = { "encrypt-write", "authorize", NULL };
     const char *const *flags = request;
@@ -163,11 +159,6 @@ static GVariant *properties_for(Export *export)
                               g_variant_new_object_path(EGP_DBUS_SERVICE));
         g_variant_builder_add(&properties, "{sv}", "Flags",
                               characteristic_flags(export->characteristic));
-        g_variant_builder_add(&properties, "{sv}", "Notifying",
-                              g_variant_new_boolean(export->bluez->notifying[export->characteristic]));
-        if (export->characteristic != EGP_BLUEZ_OPERATION_RESULT)
-            g_variant_builder_add(&properties, "{sv}", "Value",
-                                  bytes_variant(export->bluez->values[export->characteristic]));
     } else if (export->type == EXPORT_ADVERTISEMENT) {
         const char *const service_uuids[] = { EGP_SERVICE_UUID, NULL };
         g_variant_builder_add(&properties, "{sv}", "Type",
@@ -239,23 +230,6 @@ static gboolean get_peer_option(GVariant *options, gboolean required,
         return FALSE;
     }
     return TRUE;
-}
-
-static void emit_changed(EgpBluez *bluez, EgpBluezCharacteristic characteristic,
-                         const char *property, GVariant *value)
-{
-    GVariantBuilder changed, invalidated;
-    g_variant_builder_init(&changed, G_VARIANT_TYPE("a{sv}"));
-    g_variant_builder_add(&changed, "{sv}", property, value);
-    g_variant_builder_init(&invalidated, G_VARIANT_TYPE("as"));
-    g_dbus_connection_emit_signal(bluez->connection, NULL,
-                                  characteristic_path(characteristic),
-                                  DBUS_PROPERTIES, "PropertiesChanged",
-                                  g_variant_new("(s@a{sv}@as)",
-                                                "org.bluez.GattCharacteristic1",
-                                                g_variant_builder_end(&changed),
-                                                g_variant_builder_end(&invalidated)),
-                                  NULL);
 }
 
 static void manager_call(Export *export, GDBusMethodInvocation *invocation)
@@ -338,23 +312,6 @@ static void characteristic_call(Export *export, const char *method,
             return;
         }
         g_free(peer);
-        g_dbus_method_invocation_return_value(invocation, NULL);
-        return;
-    }
-    gboolean notify_characteristic =
-        export->characteristic == EGP_BLUEZ_RUNTIME_STATUS;
-    if (!notify_characteristic) {
-        egp_error_set(&error, EGP_ERROR_BLE_PAYLOAD_INVALID, FALSE,
-                      EGP_PERSISTENT_CHANGE_NONE,
-                      "Characteristic does not support notifications");
-        return_error(invocation, &error);
-        return;
-    }
-    if (!strcmp(method, "StartNotify") || !strcmp(method, "StopNotify")) {
-        gboolean enabled = !strcmp(method, "StartNotify");
-        bluez->notifying[export->characteristic] = enabled;
-        emit_changed(bluez, export->characteristic, "Notifying",
-                     g_variant_new_boolean(enabled));
         g_dbus_method_invocation_return_value(invocation, NULL);
         return;
     }
@@ -471,11 +428,6 @@ static GVariant *get_property(GDBusConnection *connection, const char *sender,
             return g_variant_new_object_path(EGP_DBUS_SERVICE);
         if (!strcmp(property_name, "Flags"))
             return characteristic_flags(export->characteristic);
-        if (!strcmp(property_name, "Notifying"))
-            return g_variant_new_boolean(export->bluez->notifying[export->characteristic]);
-        if (!strcmp(property_name, "Value") &&
-            export->characteristic != EGP_BLUEZ_OPERATION_RESULT)
-            return bytes_variant(export->bluez->values[export->characteristic]);
     } else if (export->type == EXPORT_ADVERTISEMENT) {
         if (!strcmp(property_name, "Type")) return g_variant_new_string("peripheral");
         if (!strcmp(property_name, "LocalName")) return g_variant_new_string(EGP_ADVERTISEMENT_NAME);
@@ -729,7 +681,6 @@ static void name_vanished(GDBusConnection *connection, const char *name,
         bluez->retry_source = 0;
     }
     memset(bluez->adapter_path, 0, sizeof(bluez->adapter_path));
-    memset(bluez->notifying, 0, sizeof(bluez->notifying));
     if (bluez->handlers.bluez_lost)
         bluez->handlers.bluez_lost(bluez->handlers.user_data);
 }
@@ -867,6 +818,7 @@ void egp_bluez_set_window(EgpBluez *bluez, gboolean open)
 }
 
 gboolean egp_bluez_peer_security(EgpBluez *bluez, const char *peer_path,
+                                 gboolean encrypted_gatt_gate,
                                  EgpPeerSecurity *peer, EgpError *error)
 {
     if (!bluez || !peer_path || !g_variant_is_object_path(peer_path) || !peer)
@@ -908,7 +860,10 @@ gboolean egp_bluez_peer_security(EgpBluez *bluez, const char *peer_path,
                         address_type && (!strcmp(address_type, "public") ||
                                          !strcmp(address_type, "random"));
     peer->stable_identity = has_address && has_type && peer->paired && peer->bonded;
-    peer->encrypted_transport = TRUE; /* exported encrypt-* flag is the transport gate */
+    /* BlueZ enforces the exported encrypt-* flag before a GATT callback. The
+     * caller marks only that initial callback fact; this adapter does not
+     * independently query controller encryption state. */
+    peer->encrypted_transport = encrypted_gatt_gate;
     g_mutex_lock(&bluez->peer_lock);
     guint64 epoch_after = peer_epoch_locked(bluez, peer_path, FALSE);
     gboolean owner_stable = !strcmp(destination, bluez->unique_owner);
@@ -980,25 +935,6 @@ void egp_bluez_disconnect_non_owner(EgpBluez *bluez, const char *owner_path)
                            disconnect_listing, request);
 }
 
-void egp_bluez_publish(EgpBluez *bluez, EgpBluezCharacteristic characteristic,
-                       const char *json)
-{
-    if (!bluez || !json || (characteristic != EGP_BLUEZ_RUNTIME_STATUS &&
-                            characteristic != EGP_BLUEZ_OPERATION_RESULT) ||
-        strlen(json) > EGP_PROTOCOL_MAX_JSON || !g_utf8_validate(json, -1, NULL))
-        return;
-    /* BlueZ 5.77's StartNotify/StopNotify server callbacks carry no device
-     * identity, so OperationResult is deliberately owner-read-only. */
-    if (characteristic == EGP_BLUEZ_OPERATION_RESULT)
-        return;
-    if (bluez->values[characteristic])
-        g_bytes_unref(bluez->values[characteristic]);
-    bluez->values[characteristic] = g_bytes_new(json, strlen(json));
-    if (bluez->notifying[characteristic])
-        emit_changed(bluez, characteristic, "Value",
-                     bytes_variant(bluez->values[characteristic]));
-}
-
 void egp_bluez_free(EgpBluez *bluez)
 {
     if (!bluez)
@@ -1026,9 +962,6 @@ void egp_bluez_free(EgpBluez *bluez)
         if (bluez->exports[i].registration_id)
             g_dbus_connection_unregister_object(bluez->connection,
                                                 bluez->exports[i].registration_id);
-    for (guint i = 0; i < 5; ++i)
-        if (bluez->values[i])
-            g_bytes_unref(bluez->values[i]);
     if (bluez->manager_info) g_dbus_node_info_unref(bluez->manager_info);
     if (bluez->service_info) g_dbus_node_info_unref(bluez->service_info);
     if (bluez->characteristic_info) g_dbus_node_info_unref(bluez->characteristic_info);

@@ -19,8 +19,10 @@ class R5IntegrationSourceContract(unittest.TestCase):
                       (ROOT / "include/edgeguard_ota/control.h").read_text(encoding="utf-8"))
         for required in ("SO_PEERCRED", "credentials.uid != 0", "CONTROL_MAX_JSON 1024u",
                          '"CHECK_UPDATE_NOW"', "json_object_get_size(object) == 3",
-                         "listen(control->listener, 3)"):
+                         "listen(control->listener, 3)",
+                         "ota_uuid_valid(request_id, FALSE)"):
             self.assertIn(required, CONTROL)
+        self.assertNotIn("ota_uuid_valid(request_id, TRUE)", CONTROL)
         for forbidden in ("rauc install", "mark-good", "mark-bad", "/dev/mmcblk", "system(", "popen("):
             self.assertNotIn(forbidden, CONTROL)
 

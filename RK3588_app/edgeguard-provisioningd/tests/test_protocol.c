@@ -153,6 +153,65 @@ static void timeout(void)
     egp_protocol_free(protocol);
 }
 
+static EgpProtocolRequest scoped_request(const char *peer, guint64 window,
+                                         guint8 txid_last)
+{
+    EgpProtocolRequest request = {0};
+    g_strlcpy(request.peer_path, peer, sizeof(request.peer_path));
+    request.characteristic = EGP_WRITABLE_CONTROL;
+    request.opcode = EGP_OPCODE_CHECK_UPDATE_NOW;
+    request.window_epoch = window;
+    request.connection_epoch = 11;
+    request.transaction_id[15] = txid_last;
+    return request;
+}
+
+static void scoped_request_identity(void)
+{
+    const char session_a[] = "11111111-2222-3333-4444-555555555555";
+    const char session_b[] = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+    EgpProtocolRequest base = scoped_request("/org/bluez/hci0/dev_AA", 7, 1);
+    EgpProtocolRequest changed = base;
+    char first[37], retry[37], other[37];
+    EgpError error = {0};
+
+    g_assert_true(egp_protocol_scoped_request_id(session_a, &base, first, &error));
+    g_assert_cmpstr(first, ==, "ccfb2301-373e-59be-4552-506e78741ce6");
+    g_assert_true(egp_protocol_scoped_request_id(session_a, &base, retry, &error));
+    g_assert_cmpstr(first, ==, retry);
+    g_assert_true(g_uuid_string_is_valid(first));
+
+    changed.window_epoch++;
+    g_assert_true(egp_protocol_scoped_request_id(session_a, &changed, other, &error));
+    g_assert_cmpstr(first, !=, other);
+
+    changed = base;
+    changed.connection_epoch++;
+    g_assert_true(egp_protocol_scoped_request_id(session_a, &changed, other, &error));
+    g_assert_cmpstr(first, !=, other);
+
+    changed = base;
+    g_strlcpy(changed.peer_path, "/org/bluez/hci0/dev_BB",
+              sizeof(changed.peer_path));
+    g_assert_true(egp_protocol_scoped_request_id(session_a, &changed, other, &error));
+    g_assert_cmpstr(first, !=, other);
+
+    changed = base;
+    changed.transaction_id[0] = 0xff;
+    changed.transaction_id[15] = 2;
+    g_assert_true(egp_protocol_scoped_request_id(session_a, &changed, other, &error));
+    g_assert_cmpstr(first, !=, other);
+
+    changed = base;
+    changed.characteristic = EGP_WRITABLE_PROVISIONING;
+    changed.opcode = EGP_OPCODE_FORGET_WIFI;
+    g_assert_true(egp_protocol_scoped_request_id(session_a, &changed, other, &error));
+    g_assert_cmpstr(first, !=, other);
+
+    g_assert_true(egp_protocol_scoped_request_id(session_b, &base, other, &error));
+    g_assert_cmpstr(first, !=, other);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -161,5 +220,6 @@ int main(int argc, char **argv)
     g_test_add_func("/protocol/overlap-conflict", overlap_conflict);
     g_test_add_func("/protocol/replay", replay_and_conflicting_reuse);
     g_test_add_func("/protocol/timeout", timeout);
+    g_test_add_func("/protocol/scoped-request-identity", scoped_request_identity);
     return g_test_run();
 }

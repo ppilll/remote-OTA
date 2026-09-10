@@ -45,6 +45,8 @@ After `/userdata` is mounted and ConnMan is or becomes available:
 - changed generation: replace the derived file atomically and apply once;
 - ConnMan unavailable: retain canonical data, report `CONNMAN_UNAVAILABLE`, and retry with bounded backoff.
 
+This reconciliation is recovery of already committed canonical state into a rootfs-local derived file. It is not a new BLE Wi-Fi mutation and therefore does not require the OTA Agent to be stably `IDLE`. It must run during post-boot obligations including `BOOT_NEW_SLOT`, `HEALTH_CHECK`, `MARK_GOOD`, and `REPORT_SUCCESS` without writing Agent state or influencing the OTA FSM. New `SET_WIFI` and `FORGET_WIFI` commits remain gated on stable Agent `IDLE` as specified by the concurrency policy.
+
 The daemon does not call `connmanctl`, `wpa_cli`, or shell commands as its product API.
 
 ## Apply and observation
@@ -80,4 +82,4 @@ The target evidence's true-to-false transition after removing the fixed derived 
 
 ## Availability recovery
 
-Track the D-Bus owner of `net.connman`. On loss, cancel pending method calls and mark application state unavailable without deleting the canonical store. On reappearance, rediscover objects and reconcile the current canonical generation. Retry uses bounded exponential backoff with jitter and a ceiling; it is not a tight loop or a board reboot requirement.
+Track the D-Bus owner of `net.connman`. On loss, cancel pending method calls and mark application state unavailable without deleting the canonical store. On reappearance, rediscover objects and reconcile the current canonical generation. Retry continues for as long as ConnMan is present and reconciliation remains retryable, using exponential backoff with jitter capped at 60 seconds. The attempt counter saturates but scheduling does not stop at a fixed attempt count. Success resets the backoff; owner reappearance explicitly retriggers it. This is not a tight loop and does not depend on daemon or board restart.

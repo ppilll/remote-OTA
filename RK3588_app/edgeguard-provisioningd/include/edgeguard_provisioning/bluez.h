@@ -46,10 +46,9 @@ EgpBluez *egp_bluez_new(GDBusConnection *connection,
 void egp_bluez_free(EgpBluez *bluez);
 void egp_bluez_set_window(EgpBluez *bluez, gboolean open);
 gboolean egp_bluez_peer_security(EgpBluez *bluez, const char *peer_path,
+                                 gboolean encrypted_gatt_gate,
                                  EgpPeerSecurity *peer, EgpError *error);
 void egp_bluez_disconnect_non_owner(EgpBluez *bluez, const char *owner_path);
-void egp_bluez_publish(EgpBluez *bluez, EgpBluezCharacteristic characteristic,
-                       const char *json);
 
 G_END_DECLS
 

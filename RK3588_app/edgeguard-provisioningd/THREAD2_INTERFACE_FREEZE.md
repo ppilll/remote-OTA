@@ -32,14 +32,16 @@ registrations without opening a closed window.
 |---|---|---|
 | service0 | `8a1d4e59-84e0-56d3-8d97-2080e5e77791` | `Primary=true` |
 | char0 DeviceInfo | `6a174d82-0b81-5fa2-bca8-1cef78011280` | `read` |
-| char1 RuntimeStatus | `ed5101e3-0964-5afa-b52c-c653c2c1e3ca` | `encrypt-read`, `notify` |
+| char1 RuntimeStatus | `ed5101e3-0964-5afa-b52c-c653c2c1e3ca` | `encrypt-read` (paired/bonded/connected gated read-only) |
 | char2 ProvisioningRequest | `9f6e55ea-003a-5254-95dd-5806ad2fb97d` | `encrypt-write`, `authorize` |
-| char3 OperationResult | `6b26b3c6-d089-5b53-9fea-5e5524ce169c` | `encrypt-read` (owner-only read; BlueZ 5.77 has no per-peer notify callback identity) |
+| char3 OperationResult | `6b26b3c6-d089-5b53-9fea-5e5524ce169c` | `encrypt-read` (owner-only read/poll) |
 | char4 ControlRequest | `413bd486-a58e-5947-b570-9cffba5eec5c` | `encrypt-write`, `authorize` |
 
 The advertisement contains only `Type=peripheral`, local name
-`EdgeGuard Setup`, and the service UUID. Read/notify values are bounded
-NUL-free UTF-8 JSON with schema version 1 and at most 1024 bytes.
+`EdgeGuard Setup`, and the service UUID. Read values are bounded NUL-free UTF-8
+JSON with schema version 1 and at most 1024 bytes. RuntimeStatus and
+OperationResult expose no notify flag, `StartNotify`/`StopNotify`, `Notifying`
+state, public `Value`, or `PropertiesChanged(Value)` publication.
 
 ## Authorization callback contract
 
@@ -48,7 +50,10 @@ before commit/control dispatch. It must re-read the BlueZ `Device1` object and
 return true only when all of the following remain true:
 
 ```text
-the call arrived through an encrypt-* GATT characteristic
+the initial sensitive request arrived through an encrypt-* GATT characteristic
+AND the active org.bluez unique owner is unchanged
+AND the provisioning window/authorization epoch is unchanged
+AND the peer connection/security epoch is unchanged
 AND Connected=true
 AND Paired=true
 AND Bonded=true
@@ -56,6 +61,10 @@ AND Address and AddressType provide a stable BlueZ identity
 AND the monotonic 120-second physical-presence window is open
 AND the same BlueZ object path owns the current window
 ```
+
+This continuity predicate fails on disconnect/reconnect, window close/reopen,
+BlueZ owner restart, or relevant pairing/bond/security-property change. It does
+not query HCI/mgmt or independently re-measure link encryption at commit.
 
 The first eligible sensitive fragment claims an otherwise-unowned window.
 Pairability is then disabled and other connected peers are disconnected.
@@ -78,12 +87,16 @@ cleared on completion, conflict, timeout, disconnect/authorization loss,
 window close, and shutdown. Completed entries retain only a request digest and
 redacted result for ten minutes.
 
-All complete operations run on one worker. `SET_WIFI`, `SET_ENDPOINT`, and
-`FORGET_WIFI` require two stable read-only `IDLE` observations before commit and
-another observation before external reconciliation. The worker calls only the
-frozen Thread 1 store/endpoint/ConnMan interfaces. `CHECK_UPDATE_NOW` uses the
-fixed root-only socket contract below and never falls back to shell, signal,
-restart, RAUC, or boot-control mutation.
+All complete operations run on one worker. New `SET_WIFI`, `SET_ENDPOINT`, and
+`FORGET_WIFI` mutations require two stable read-only `IDLE` observations before
+commit and another observation before external apply. Startup/recovery
+reconciliation of already committed canonical Wi-Fi state does not use that
+predicate and may repair rootfs-local ConnMan state during `BOOT_NEW_SLOT`,
+`HEALTH_CHECK`, `MARK_GOOD`, or `REPORT_SUCCESS`. Retryable reconciliation
+continues with capped exponential backoff and does not require restart. The
+worker calls only the frozen Thread 1 store/endpoint/ConnMan interfaces.
+`CHECK_UPDATE_NOW` uses the fixed root-only socket contract below and never
+falls back to shell, signal, restart, RAUC, or boot-control mutation.
 
 ## Status and Thread 3 source expectations
 
@@ -101,6 +114,12 @@ Thread 2 reads these sources only:
 Thread 3 owns the socket server and Agent wakeup. It must keep the frozen
 4-byte big-endian length plus JSON protocol, root peer-credential check,
 one-request-per-connection bound, and `CHECK_UPDATE_NOW` as the sole command.
+The provisioning client derives its canonical UUID-text `request_id` from a
+domain-separated scope containing a fresh daemon-session UUID, window epoch,
+peer connection/security epoch, peer path, writable characteristic, command
+opcode, and the complete 128-bit GATT transaction ID. Retries in one logical
+scope are stable; new windows/connections, peers, txids, or daemon sessions
+cannot reuse the same derived identity in the Agent cache.
 It also owns endpoint refresh in the Agent. It must not make the provisioning
 daemon a writer of Agent state or an OTA state authority.
 

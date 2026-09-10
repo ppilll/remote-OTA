@@ -1,6 +1,7 @@
 #ifndef EDGEGUARD_PROVISIONING_STATUS_H
 #define EDGEGUARD_PROVISIONING_STATUS_H
 
+#include "protocol.h"
 #include "store.h"
 
 G_BEGIN_DECLS
@@ -33,7 +34,7 @@ gboolean egp_status_runtime_json(EgpStatus *status, char output[EGP_STATUS_MAX_J
 /* Fixed-path, fixed-command IPC client. It never falls back to a signal,
  * restart, shell, or direct OTA operation. */
 gboolean egp_status_check_update_now(EgpStatus *status,
-                                     const guint8 transaction_id[16],
+                                     const EgpProtocolRequest *request,
                                      EgpError *error);
 
 G_END_DECLS

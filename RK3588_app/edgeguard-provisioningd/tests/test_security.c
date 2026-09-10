@@ -75,6 +75,37 @@ static void fail_closed_properties(void)
     egp_security_free(security);
 }
 
+static void encrypted_read_gates(void)
+{
+    EgpSecurity *security = egp_security_new(NULL, NULL);
+    EgpPeerSecurity peer = eligible_peer();
+    EgpError error = {0};
+    g_assert_true(egp_security_can_read_runtime(security, &peer, &error));
+
+    peer.connected = FALSE;
+    g_assert_false(egp_security_can_read_runtime(security, &peer, &error));
+    peer = eligible_peer();
+    peer.paired = FALSE;
+    g_assert_false(egp_security_can_read_runtime(security, &peer, &error));
+    peer = eligible_peer();
+    peer.bonded = FALSE;
+    g_assert_false(egp_security_can_read_runtime(security, &peer, &error));
+    peer = eligible_peer();
+    peer.encrypted_transport = FALSE;
+    g_assert_false(egp_security_can_read_runtime(security, &peer, &error));
+
+    peer = eligible_peer();
+    gint64 now = g_get_monotonic_time();
+    egp_security_open_window(security, now);
+    g_assert_true(egp_security_authorize_sensitive(
+        security, "/org/bluez/hci0/dev_AA", &peer, TRUE, now + 1, &error));
+    g_assert_true(egp_security_can_read_result(
+        security, "/org/bluez/hci0/dev_AA", &peer, &error));
+    g_assert_false(egp_security_can_read_result(
+        security, "/org/bluez/hci0/dev_BB", &peer, &error));
+    egp_security_free(security);
+}
+
 static void bluez_loss_revokes_owner(void)
 {
     EgpSecurity *security = egp_security_new(NULL, NULL);
@@ -105,6 +136,13 @@ static void commit_requires_same_epochs(void)
         security, "/org/bluez/hci0/dev_AA", &peer, window_epoch,
         peer.connection_epoch, now + 2, &error));
 
+    /* Commit relies on the accepted-write epoch and current peer properties;
+     * it does not pretend to re-measure link encryption independently. */
+    peer.encrypted_transport = FALSE;
+    g_assert_true(egp_security_authorize_commit(
+        security, "/org/bluez/hci0/dev_AA", &peer, window_epoch,
+        peer.connection_epoch, now + 2, &error));
+
     peer.connection_epoch++;
     g_assert_false(egp_security_authorize_commit(
         security, "/org/bluez/hci0/dev_AA", &peer, window_epoch,
@@ -121,13 +159,55 @@ static void commit_requires_same_epochs(void)
     egp_security_free(security);
 }
 
+static void commit_rejects_security_continuity_changes(void)
+{
+    EgpSecurity *security = egp_security_new(NULL, NULL);
+    EgpPeerSecurity peer = eligible_peer();
+    EgpError error = {0};
+    gint64 now = g_get_monotonic_time();
+    egp_security_open_window(security, now);
+    g_assert_true(egp_security_authorize_sensitive(
+        security, "/org/bluez/hci0/dev_AA", &peer, TRUE, now + 1, &error));
+    guint64 window_epoch = egp_security_window_epoch(security);
+
+    peer.connected = FALSE;
+    peer.connection_epoch++;
+    g_assert_false(egp_security_authorize_commit(
+        security, "/org/bluez/hci0/dev_AA", &peer, window_epoch, 1,
+        now + 2, &error));
+
+    peer = eligible_peer();
+    peer.paired = FALSE;
+    peer.connection_epoch++;
+    g_assert_false(egp_security_authorize_commit(
+        security, "/org/bluez/hci0/dev_AA", &peer, window_epoch, 1,
+        now + 3, &error));
+
+    peer = eligible_peer();
+    peer.bonded = FALSE;
+    peer.connection_epoch++;
+    g_assert_false(egp_security_authorize_commit(
+        security, "/org/bluez/hci0/dev_AA", &peer, window_epoch, 1,
+        now + 4, &error));
+
+    peer = eligible_peer();
+    egp_security_bluez_lost(security);
+    g_assert_false(egp_security_authorize_commit(
+        security, "/org/bluez/hci0/dev_AA", &peer, window_epoch,
+        peer.connection_epoch, now + 5, &error));
+    egp_security_free(security);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
     g_test_add_func("/security/closed-default", closed_by_default);
     g_test_add_func("/security/single-owner", single_owner);
     g_test_add_func("/security/fail-closed-properties", fail_closed_properties);
+    g_test_add_func("/security/encrypted-read-gates", encrypted_read_gates);
     g_test_add_func("/security/bluez-loss", bluez_loss_revokes_owner);
     g_test_add_func("/security/commit-epochs", commit_requires_same_epochs);
+    g_test_add_func("/security/commit-continuity",
+                    commit_rejects_security_continuity_changes);
     return g_test_run();
 }

@@ -86,7 +86,7 @@ Thread 1 may add backend-focused test sources. It does not own BlueZ/GATT files,
 
 ### Scope and ownership
 
-Own `edgeguard-provisioningd` main, GDBus ObjectManager/GATT/advertising/agent adapters, input/window handling, protocol reassembly, authorization, result/status serialization, and their headers/tests. Do not alter Thread 1 backend implementations or the existing OTA Agent. Call only Thread 1's frozen public interfaces.
+Own `edgeguard-provisioningd` main, GDBus ObjectManager/GATT/advertising/agent adapters, input/window handling, protocol reassembly, authorization, result/status encrypted read/poll serialization, and their headers/tests. The owner-approved re-freeze makes RuntimeStatus paired/bonded/connected gated encrypted read-only and OperationResult owner-only encrypted read/poll; neither has a notification surface. Do not alter Thread 1 backend implementations or the existing OTA Agent. Call only Thread 1's frozen public interfaces.
 
 End by freezing the D-Bus object tree, UUID/property registry, authorization callback contract, status source expectations, and source list for Thread 3.
 

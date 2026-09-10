@@ -33,6 +33,12 @@ struct _EgpProtocol {
     GHashTable *expired;
 };
 
+static gboolean fail(EgpError *error, EgpErrorCode code, gboolean retryable,
+                     const char *message);
+static gboolean transaction_id_nonzero(const guint8 id[16]);
+static gboolean opcode_allowed(EgpWritableCharacteristic characteristic,
+                               guint8 opcode);
+
 static void secure_clear(void *memory, gsize length)
 {
     volatile guint8 *bytes = memory;
@@ -71,6 +77,66 @@ void egp_transaction_id_format(const guint8 id[16], char output[37])
                "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
                id[0], id[1], id[2], id[3], id[4], id[5], id[6], id[7],
                id[8], id[9], id[10], id[11], id[12], id[13], id[14], id[15]);
+}
+
+static void checksum_field(GChecksum *checksum, const guint8 *data, gsize length)
+{
+    guint8 encoded_length[4] = {
+        (guint8)(length >> 24), (guint8)(length >> 16),
+        (guint8)(length >> 8), (guint8)length
+    };
+    g_checksum_update(checksum, encoded_length, sizeof(encoded_length));
+    if (length)
+        g_checksum_update(checksum, data, length);
+}
+
+gboolean egp_protocol_scoped_request_id(const char *daemon_session_id,
+                                        const EgpProtocolRequest *request,
+                                        char output[37], EgpError *error)
+{
+    static const guint8 domain[] =
+        "edgeguard-provisioningd/agent-request-id/v1";
+    if (!daemon_session_id || !g_uuid_string_is_valid(daemon_session_id) ||
+        !request || !output || !request->window_epoch ||
+        !request->connection_epoch ||
+        !g_variant_is_object_path(request->peer_path) ||
+        !transaction_id_nonzero(request->transaction_id) ||
+        !opcode_allowed(request->characteristic, request->opcode))
+        return fail(error, EGP_ERROR_INTERNAL_ERROR, FALSE,
+                    "Scoped Agent request identity input is invalid");
+
+    guint8 window_epoch[8], connection_epoch[8];
+    for (guint i = 0; i < sizeof(window_epoch); ++i) {
+        window_epoch[i] = (guint8)(request->window_epoch >> (56u - 8u * i));
+        connection_epoch[i] =
+            (guint8)(request->connection_epoch >> (56u - 8u * i));
+    }
+    guint8 characteristic = (guint8)request->characteristic;
+    GChecksum *checksum = g_checksum_new(G_CHECKSUM_SHA256);
+    checksum_field(checksum, domain, sizeof(domain) - 1u);
+    checksum_field(checksum, (const guint8 *)daemon_session_id,
+                   strlen(daemon_session_id));
+    checksum_field(checksum, window_epoch, sizeof(window_epoch));
+    checksum_field(checksum, connection_epoch, sizeof(connection_epoch));
+    checksum_field(checksum, (const guint8 *)request->peer_path,
+                   strlen(request->peer_path));
+    checksum_field(checksum, &characteristic, sizeof(characteristic));
+    checksum_field(checksum, &request->opcode, sizeof(request->opcode));
+    checksum_field(checksum, request->transaction_id,
+                   sizeof(request->transaction_id));
+    guint8 digest[32];
+    gsize digest_length = sizeof(digest);
+    g_checksum_get_digest(checksum, digest, &digest_length);
+    g_checksum_free(checksum);
+    if (digest_length != sizeof(digest)) {
+        memset(digest, 0, sizeof(digest));
+        return fail(error, EGP_ERROR_INTERNAL_ERROR, FALSE,
+                    "Scoped Agent request identity generation failed");
+    }
+    egp_transaction_id_format(digest, output);
+    memset(digest, 0, sizeof(digest));
+    egp_error_clear(error);
+    return TRUE;
 }
 
 static char *completed_key(const char *peer_path,

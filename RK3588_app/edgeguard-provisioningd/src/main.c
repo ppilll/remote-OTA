@@ -66,9 +66,11 @@ static void input_lost(gpointer user_data)
 }
 
 static gboolean peer_security(Daemon *daemon, const char *peer_path,
+                              gboolean encrypted_gatt_gate,
                               EgpPeerSecurity *peer, EgpError *error)
 {
-    return egp_bluez_peer_security(daemon->bluez, peer_path, peer, error);
+    return egp_bluez_peer_security(daemon->bluez, peer_path,
+                                   encrypted_gatt_gate, peer, error);
 }
 
 static gboolean authorize_commit(gpointer user_data, const char *peer_path,
@@ -78,7 +80,7 @@ static gboolean authorize_commit(gpointer user_data, const char *peer_path,
 {
     Daemon *daemon = user_data;
     EgpPeerSecurity peer;
-    return peer_security(daemon, peer_path, &peer, error) &&
+    return peer_security(daemon, peer_path, FALSE, &peer, error) &&
            egp_security_authorize_commit(daemon->security, peer_path, &peer,
                                          window_epoch, connection_epoch,
                                          g_get_monotonic_time(), error);
@@ -105,9 +107,6 @@ static void result_published(gpointer user_data, const char *peer_path,
                                  result_json, g_get_monotonic_time(), &ignored);
     g_strlcpy(daemon->result_peer, peer_path, sizeof(daemon->result_peer));
     g_strlcpy(daemon->last_result, result_json, sizeof(daemon->last_result));
-    if (egp_security_owner(daemon->security) &&
-        !strcmp(egp_security_owner(daemon->security), peer_path))
-        egp_bluez_publish(daemon->bluez, EGP_BLUEZ_OPERATION_RESULT, result_json);
     if (strstr(result_json, "\"status\":\"SUCCEEDED\"")) {
         daemon->active_valid = FALSE;
         memset(&daemon->active_request, 0, sizeof(daemon->active_request));
@@ -130,13 +129,13 @@ static gboolean read_value(gpointer user_data, EgpBluezCharacteristic characteri
             return FALSE;
     } else if (characteristic == EGP_BLUEZ_RUNTIME_STATUS) {
         EgpPeerSecurity peer;
-        if (!peer_security(daemon, peer_path, &peer, error) ||
+        if (!peer_security(daemon, peer_path, TRUE, &peer, error) ||
             !egp_security_can_read_runtime(daemon->security, &peer, error) ||
             !egp_status_runtime_json(daemon->status, json, &length, error))
             return FALSE;
     } else if (characteristic == EGP_BLUEZ_OPERATION_RESULT) {
         EgpPeerSecurity peer;
-        if (!peer_security(daemon, peer_path, &peer, error) ||
+        if (!peer_security(daemon, peer_path, TRUE, &peer, error) ||
             !egp_security_can_read_result(daemon->security, peer_path, &peer, error))
             return FALSE;
         if (!daemon->last_result[0] || strcmp(peer_path, daemon->result_peer)) {
@@ -183,7 +182,7 @@ static gboolean write_value(gpointer user_data, EgpBluezCharacteristic character
     EgpPeerSecurity peer;
     const char *owner_before = egp_security_owner(daemon->security);
     gboolean claiming = owner_before == NULL;
-    if (!peer_security(daemon, peer_path, &peer, error) ||
+    if (!peer_security(daemon, peer_path, TRUE, &peer, error) ||
         !egp_security_allow_pairing(daemon->security, peer_path,
                                     g_get_monotonic_time(), error))
         return FALSE;
@@ -216,8 +215,6 @@ static gboolean write_value(gpointer user_data, EgpBluezCharacteristic character
             g_strlcpy(daemon->result_peer, peer_path, sizeof(daemon->result_peer));
             g_strlcpy(daemon->last_result, output.cached_result,
                       sizeof(daemon->last_result));
-            egp_bluez_publish(daemon->bluez, EGP_BLUEZ_OPERATION_RESULT,
-                              output.cached_result);
         }
         memset(&output, 0, sizeof(output));
         return TRUE;
@@ -264,25 +261,22 @@ static void peer_disconnected(gpointer user_data, const char *peer_path)
     egp_protocol_drop_peer(daemon->protocol, peer_path);
 }
 
-#define CONNMAN_RECONCILE_MAX_ATTEMPTS 6u
-
 static gboolean connman_reconcile_retry(gpointer user_data);
 
 static void schedule_connman_reconcile(Daemon *daemon)
 {
     if (!daemon || daemon->shutting_down || !daemon->connman_present ||
-        daemon->connman_retry_source ||
-        daemon->connman_retry_attempt >= CONNMAN_RECONCILE_MAX_ATTEMPTS)
+        daemon->connman_retry_source)
         return;
-    guint delay = daemon->connman_retry_attempt == 0 ? 1u :
-        egp_connman_retry_delay_ms(daemon->connman_retry_attempt - 1u,
-                                   g_random_int());
+    guint delay = egp_connman_retry_delay_ms(daemon->connman_retry_attempt,
+                                             g_random_int());
     daemon->connman_retry_source = g_timeout_add(delay,
                                                  connman_reconcile_retry,
                                                  daemon);
 }
 
-static void connman_reconciled(gpointer user_data, EgpErrorCode code)
+static void connman_reconciled(gpointer user_data, EgpErrorCode code,
+                               gboolean retryable)
 {
     Daemon *daemon = user_data;
     if (!daemon || daemon->shutting_down)
@@ -291,11 +285,7 @@ static void connman_reconciled(gpointer user_data, EgpErrorCode code)
         daemon->connman_retry_attempt = 0;
         return;
     }
-    if (code == EGP_ERROR_CONNMAN_UNAVAILABLE ||
-        code == EGP_ERROR_CONNMAN_APPLY_FAILED ||
-        code == EGP_ERROR_WIFI_CONNECT_TIMEOUT ||
-        code == EGP_ERROR_AGENT_BUSY ||
-        code == EGP_ERROR_PROVISIONING_BUSY)
+    if (retryable)
         schedule_connman_reconcile(daemon);
 }
 
@@ -305,11 +295,12 @@ static gboolean connman_reconcile_retry(gpointer user_data)
     daemon->connman_retry_source = 0;
     if (daemon->shutting_down || !daemon->connman_present)
         return G_SOURCE_REMOVE;
-    daemon->connman_retry_attempt++;
+    if (daemon->connman_retry_attempt < G_MAXUINT)
+        daemon->connman_retry_attempt++;
     EgpError error = {0};
     if (!egp_operations_reconcile(daemon->operations, connman_reconciled,
                                   daemon, &error))
-        connman_reconciled(daemon, error.code);
+        connman_reconciled(daemon, error.code, error.retryable);
     return G_SOURCE_REMOVE;
 }
 
@@ -346,11 +337,6 @@ static gboolean refresh_status(gpointer user_data)
 {
     Daemon *daemon = user_data;
     egp_status_refresh(daemon->status);
-    char json[EGP_STATUS_MAX_JSON + 1u];
-    gsize length = 0;
-    EgpError ignored = {0};
-    if (egp_status_runtime_json(daemon->status, json, &length, &ignored))
-        egp_bluez_publish(daemon->bluez, EGP_BLUEZ_RUNTIME_STATUS, json);
     return G_SOURCE_CONTINUE;
 }
 

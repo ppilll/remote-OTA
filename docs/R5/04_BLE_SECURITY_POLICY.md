@@ -22,7 +22,7 @@ Physical presence supplies the additional local authorization factor. The input 
 
 The window may be reopened only by a new physical-presence event. Being unprovisioned does not by itself open an unlimited advertising window.
 
-Only one peer is provisioning-authorized per window. The first eligible bonded/encrypted peer that completes application authorization becomes the window owner; pairability is then disabled and other peers' sensitive writes are rejected. An existing bond is only an input to this selection, never permanent authorization. Closing the window clears the owner. OperationResult is owner-only encrypted read because BlueZ 5.77 does not expose peer identity to application-side notification callbacks.
+Only one peer is provisioning-authorized per window. The first eligible bonded/encrypted peer that completes application authorization becomes the window owner; pairability is then disabled and other peers' sensitive writes are rejected. An existing bond is only an input to this selection, never permanent authorization. Closing the window clears the owner. OperationResult is re-frozen as owner-only encrypted read/poll and has no notification surface.
 
 ## Advertising policy
 
@@ -32,7 +32,7 @@ On BlueZ disappearance/reappearance, rebuild the GATT and advertisement registra
 
 ## Authorization predicate
 
-A sensitive write is allowed only when all predicates are true at fragment acceptance and again at commit:
+A sensitive write is allowed only when all predicates are true at fragment acceptance:
 
 ```text
 encrypted link
@@ -43,9 +43,25 @@ AND peer was admitted during the current window
 AND operation is allowed by the concurrency policy
 ```
 
+At commit, the daemon re-reads current BlueZ peer properties and requires all of the following continuity predicates:
+
+```text
+the initial sensitive request passed its encrypted GATT characteristic gate
+AND the active org.bluez unique owner is unchanged
+AND provisioning window/authorization epoch is unchanged
+AND peer connection/security epoch is unchanged
+AND the same BlueZ object path and stable Address/AddressType identity remain
+AND Connected=true
+AND Paired=true
+AND Bonded=true
+AND operation is still allowed by the concurrency policy
+```
+
+The epoch/property check detects disconnect/reconnect, window close/reopen, BlueZ owner restart, and pairing/bond/security-property changes. R5 does not query HCI or the management socket and does not independently re-measure link encryption at commit.
+
 `Connected=true`, `Paired=true`, or `Trusted=true` alone is never sufficient. The daemon's current-window authorization is volatile and is cleared on window close, BlueZ ownership loss, or daemon restart. BlueZ `Trusted` may be managed for bond lifecycle but is not the application authorization database.
 
-DeviceInfo is the only unpaired read and contains no secrets. RuntimeStatus and OperationResult require an encrypted link. All writes use `encrypt-write` plus `authorize`. The daemon accepts characteristic and Agent method calls only from the current unique `org.bluez` bus owner, and binds commit authorization to the same window and peer connection/security epochs captured by the accepted encrypted write. Do not change to `encrypt-authenticated-write` unless later target evidence proves compatible authenticated pairing behavior and the policy is formally revised.
+DeviceInfo is the only unpaired read and contains no secrets. RuntimeStatus requires `Connected=true`, `Paired=true`, `Bonded=true`, stable peer identity, and its `encrypt-read` characteristic gate. OperationResult requires the same conditions plus ownership of the current provisioning window. Both are read/poll-only and expose no notify methods, state, or value publication. All writes use `encrypt-write` plus `authorize`. The daemon accepts characteristic and Agent method calls only from the current unique `org.bluez` bus owner, and binds commit authorization to the same window and peer connection/security epochs captured by the accepted encrypted write. Do not change to `encrypt-authenticated-write` unless later target evidence proves compatible authenticated pairing behavior and the policy is formally revised.
 
 ## Pairing and bond rules
 
@@ -62,9 +78,10 @@ DeviceInfo is the only unpaired read and contains no secrets. RuntimeStatus and 
 | Peer state | DeviceInfo | RuntimeStatus | Sensitive write |
 |---|---:|---:|---:|
 | Unpaired | allow | deny | deny |
-| Paired/bonded, window closed | allow | allow on encrypted link | deny |
-| Paired/bonded, window open, not admitted | allow | allow on encrypted link | deny |
-| Paired/bonded, admitted in current window | allow | allow on encrypted link | allow if concurrency permits |
+| Disconnected, even if paired/bonded | not applicable | deny | deny |
+| Connected and paired/bonded, window closed | allow | allow through `encrypt-read` | deny |
+| Connected and paired/bonded, window open, not admitted | allow | allow through `encrypt-read` | deny |
+| Connected and paired/bonded, admitted in current window | allow | allow through `encrypt-read` | allow if concurrency permits |
 
 ## Negative requirements
 

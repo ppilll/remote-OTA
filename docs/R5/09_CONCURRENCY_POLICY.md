@@ -4,7 +4,7 @@
 
 R5 v1 does not stage deferred mutations. A mutable provisioning operation either commits in an eligible state or returns a typed busy/rejected error with no persistent change. Status reads remain available in every state.
 
-Eligibility is decided from a bounded, read-only snapshot of the existing Agent durable state immediately before commit and checked again before external apply. Missing, corrupt, changing, or ambiguous Agent state fails closed.
+Eligibility for a new BLE mutation is decided from a bounded, read-only snapshot of the existing Agent durable state immediately before commit and checked again before external apply. Missing, corrupt, changing, or ambiguous Agent state fails closed for that new mutation. Recovery reconciliation of previously committed canonical state is governed by the explicit exception below.
 
 ## Matrix
 
@@ -27,7 +27,7 @@ Eligibility is decided from a bounded, read-only snapshot of the existing Agent 
 | `ERROR` | allow | reject ambiguous | reject ambiguous | reject | unsupported/reject |
 | unavailable/corrupt | partial/unavailable | reject fail-closed | reject fail-closed | IPC unavailable/reject | unsupported/reject |
 
-The conservative `REPORT_SUCCESS` rule preserves the committed firmware/report obligation. Network repair during an error may be designed later with a separate proven recovery contract; v1 does not infer that it is safe.
+The matrix governs new BLE mutations. The conservative `REPORT_SUCCESS` rule preserves the committed firmware/report obligation by rejecting new changes. Separately, startup/recovery reconciliation of an already committed canonical Wi-Fi generation into rootfs-local ConnMan derived state is allowed in every frozen Agent state, including `BOOT_NEW_SLOT`, `HEALTH_CHECK`, `MARK_GOOD`, and `REPORT_SUCCESS`. That recovery has no Agent-state, OTA-FSM, RAUC, reboot, or slot-mutation authority. It does not relax the stable-`IDLE` gate for a new `SET_WIFI`, `FORGET_WIFI`, or `SET_ENDPOINT` commit.
 
 ## Race handling
 
@@ -38,6 +38,7 @@ The state check and persistent commit are serialized against other provisioning 
 - after a Wi-Fi or endpoint commit begins, the daemon blocks new check requests until apply/result publication completes;
 - if Agent state changes away from `IDLE` before commit, abort with no write;
 - if it changes after a completed atomic commit, finish reconciliation without touching OTA state and report `PROVISIONING_RACE`; do not roll back an OTA action or kill/restart the Agent.
+- startup/recovery reconciliation uses the serialized ConnMan worker but no Agent-state eligibility predicate; retryable failures use continuous capped backoff and do not wait for a daemon/board restart.
 
 Thread 3 may implement a minimal in-process Agent `IDLE` snapshot helper, but it must not add a new durable state or provisioning-owned lock inside RAUC lifecycle code.
 

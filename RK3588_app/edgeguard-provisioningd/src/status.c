@@ -39,6 +39,7 @@ struct _EgpStatus {
     char last_ota_error[64];
     gboolean slot_available;
     char current_slot[2];
+    char daemon_session_id[37];
 };
 
 static gboolean status_fail(EgpError *error, EgpErrorCode code, const char *message)
@@ -324,6 +325,16 @@ EgpStatus *egp_status_new(EgpStore *store)
     g_mutex_init(&status->lock);
     status->store = store;
     status->provisioning_state = EGP_STATE_UNPROVISIONED;
+    char *session_id = g_uuid_string_random();
+    if (!session_id || !g_uuid_string_is_valid(session_id)) {
+        g_free(session_id);
+        g_mutex_clear(&status->lock);
+        g_free(status);
+        return NULL;
+    }
+    g_strlcpy(status->daemon_session_id, session_id,
+              sizeof(status->daemon_session_id));
+    g_free(session_id);
     return status;
 }
 
@@ -569,19 +580,13 @@ static gboolean read_all(int fd, void *buffer, gsize length)
     return TRUE;
 }
 
-static void ipc_request_id(const guint8 transaction_id[16], char output[37])
-{
-    /* The IPC contract requires canonical UUID text, not UUIDv4. Formatting
-     * the opaque 128-bit GATT ID verbatim is injective; forcing version and
-     * variant bits would deterministically collapse 64 distinct IDs. */
-    egp_transaction_id_format(transaction_id, output);
-}
-
 gboolean egp_status_check_update_now(EgpStatus *status,
-                                     const guint8 transaction_id[16],
+                                     const EgpProtocolRequest *protocol_request,
                                      EgpError *error)
 {
-    (void)status;
+    if (!status || !protocol_request)
+        return status_fail(error, EGP_ERROR_INTERNAL_ERROR,
+                           "Agent control request scope is invalid");
     struct stat st;
     if (lstat(EGP_AGENT_CONTROL_SOCKET, &st) < 0 || !S_ISSOCK(st.st_mode) ||
         st.st_uid != 0 || (st.st_mode & 0077))
@@ -618,7 +623,11 @@ gboolean egp_status_check_update_now(EgpStatus *status,
                            "Agent control socket connection failed");
     }
     char request_id[37];
-    ipc_request_id(transaction_id, request_id);
+    if (!egp_protocol_scoped_request_id(status->daemon_session_id,
+                                        protocol_request, request_id, error)) {
+        close(fd);
+        return FALSE;
+    }
     char *request = g_strdup_printf(
         "{\"version\":1,\"request_id\":\"%s\",\"command\":\"CHECK_UPDATE_NOW\"}",
         request_id);

@@ -32,7 +32,7 @@ The current repository contains the frozen R4 package at `docs/R4/01_FINAL_BASEL
 |---|---|
 | `01_IMPLEMENTATION_PLAN.md` | ordering, interfaces, acceptance boundary |
 | `02_ARCHITECTURE_CONTEXT.md` | component ownership and frozen contracts |
-| `03_GATT_SPEC.md` | UUIDs, wire framing, operations, notifications |
+| `03_GATT_SPEC.md` | UUIDs, wire framing, operations, encrypted read/poll surfaces |
 | `04_BLE_SECURITY_POLICY.md` | pairing, authorization, window, advertising |
 | `05_PROVISIONING_STORE_SPEC.md` | canonical persistent schema and transactions |
 | `06_CONNMAN_INTEGRATION.md` | selected persistence option and apply/revoke flow |

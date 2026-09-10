@@ -13,6 +13,7 @@ typedef struct {
     guint64 endpoint_generation;
     char endpoint[EGP_ENDPOINT_MAX_BYTES + 1u];
     EgpErrorCode reconcile_code;
+    gboolean reconcile_retryable;
     EgpReconcileCompleted reconcile_completed;
     gpointer reconcile_data;
     GCancellable *cancellable;
@@ -409,7 +410,7 @@ static void check_update(Work *work, EgpError *result)
         !authorize_and_idle(work, result))
         return;
     if (egp_status_check_update_now(work->operations->status,
-                                    work->request.transaction_id, result))
+                                    &work->request, result))
         set_success(result, EGP_PERSISTENT_CHANGE_NONE,
                     "OTA check request accepted by the Agent");
 }
@@ -422,8 +423,6 @@ static void reconcile_canonical(Work *work, EgpError *result)
     if (!egp_store_forget_pending(operations->store, &wifi, &pending, result))
         goto done;
     if (pending) {
-        if (!stable_idle(operations, result))
-            goto done;
         EgpConnmanResult connman_result = {0};
         if (!egp_connman_revoke(operations->connman, &wifi,
                                 CONNMAN_TIMEOUT_MS, work->cancellable,
@@ -460,8 +459,6 @@ static void reconcile_canonical(Work *work, EgpError *result)
                     "Absent canonical Wi-Fi reconciled");
         goto done;
     }
-    if (!stable_idle(operations, result))
-        goto done;
     EgpConnmanResult connman_result = {0};
     gboolean applied = egp_connman_apply(operations->connman, &wifi,
                                          CONNMAN_TIMEOUT_MS,
@@ -486,6 +483,7 @@ static void worker(GTask *task, gpointer source_object, gpointer task_data,
     if (work->reconcile) {
         reconcile_canonical(work, &result);
         work->reconcile_code = result.code;
+        work->reconcile_retryable = result.retryable;
         g_task_return_boolean(task, TRUE);
         return;
     }
@@ -541,7 +539,8 @@ static void completed(GObject *source_object, GAsyncResult *result,
     if (work->reconcile) {
         if (work->reconcile_completed)
             work->reconcile_completed(work->reconcile_data,
-                                      work->reconcile_code);
+                                      work->reconcile_code,
+                                      work->reconcile_retryable);
     } else if (operations->result_published) {
         operations->result_published(operations->user_data,
                                      work->request.peer_path, work->result);
