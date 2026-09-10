@@ -24,7 +24,7 @@ The target observations above authorize the design decisions in this package. Th
 
 ## Repository-baseline note
 
-The repository snapshot examined for this package contains `docs/R3/`, `docs/BOOT-GATE/`, the OTA Agent sources, and the Rockchip A/B sources, but no `docs/R4/` directory. The thread reading lists therefore cite only paths that actually exist: the current OTA Agent/Buildroot files are the R4 implementation baseline, while the confirmed R4 target identity above is recorded as evidence. Do not invent `docs/R4/*` paths.
+The current repository contains the frozen R4 package at `docs/R4/01_FINAL_BASELINE.md` through `docs/R4/06_EVIDENCE_REFERENCES.md`. Read those files together with `docs/BOOT-GATE/` and the current OTA Agent/Buildroot sources before changing R5 integration. R4 evidence remains frozen: R5 may correct its references to that package, but must not rewrite historical R4 evidence.
 
 ## Document map
 

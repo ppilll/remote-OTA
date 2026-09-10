@@ -39,12 +39,15 @@ struct _EgpBluez {
     guint name_watch;
     guint properties_subscription;
     guint retry_source;
+    GMutex peer_lock;
+    GHashTable *peer_epochs;
+    guint64 next_peer_epoch;
     gboolean bluez_present;
     gboolean window_open;
     gboolean advertisement_registered;
     gboolean application_registered;
     gboolean agent_registered;
-    gboolean result_owner_active;
+    char unique_owner[64];
     char adapter_path[EGP_DBUS_PATH_CAP];
     gboolean notifying[5];
     GBytes *values[5];
@@ -121,13 +124,15 @@ static GVariant *characteristic_flags(EgpBluezCharacteristic characteristic)
 {
     static const char *const device_info[] = { "read", NULL };
     static const char *const status[] = { "encrypt-read", "notify", NULL };
+    static const char *const result[] = { "encrypt-read", NULL };
     static const char *const request[] = { "encrypt-write", "authorize", NULL };
     const char *const *flags = request;
     if (characteristic == EGP_BLUEZ_DEVICE_INFO)
         flags = device_info;
-    else if (characteristic == EGP_BLUEZ_RUNTIME_STATUS ||
-             characteristic == EGP_BLUEZ_OPERATION_RESULT)
+    else if (characteristic == EGP_BLUEZ_RUNTIME_STATUS)
         flags = status;
+    else if (characteristic == EGP_BLUEZ_OPERATION_RESULT)
+        flags = result;
     return string_array(flags);
 }
 
@@ -160,8 +165,9 @@ static GVariant *properties_for(Export *export)
                               characteristic_flags(export->characteristic));
         g_variant_builder_add(&properties, "{sv}", "Notifying",
                               g_variant_new_boolean(export->bluez->notifying[export->characteristic]));
-        g_variant_builder_add(&properties, "{sv}", "Value",
-                              bytes_variant(export->bluez->values[export->characteristic]));
+        if (export->characteristic != EGP_BLUEZ_OPERATION_RESULT)
+            g_variant_builder_add(&properties, "{sv}", "Value",
+                                  bytes_variant(export->bluez->values[export->characteristic]));
     } else if (export->type == EXPORT_ADVERTISEMENT) {
         const char *const service_uuids[] = { EGP_SERVICE_UUID, NULL };
         g_variant_builder_add(&properties, "{sv}", "Type",
@@ -336,8 +342,7 @@ static void characteristic_call(Export *export, const char *method,
         return;
     }
     gboolean notify_characteristic =
-        export->characteristic == EGP_BLUEZ_RUNTIME_STATUS ||
-        export->characteristic == EGP_BLUEZ_OPERATION_RESULT;
+        export->characteristic == EGP_BLUEZ_RUNTIME_STATUS;
     if (!notify_characteristic) {
         egp_error_set(&error, EGP_ERROR_BLE_PAYLOAD_INVALID, FALSE,
                       EGP_PERSISTENT_CHANGE_NONE,
@@ -347,14 +352,6 @@ static void characteristic_call(Export *export, const char *method,
     }
     if (!strcmp(method, "StartNotify") || !strcmp(method, "StopNotify")) {
         gboolean enabled = !strcmp(method, "StartNotify");
-        if (enabled && export->characteristic == EGP_BLUEZ_OPERATION_RESULT &&
-            !bluez->result_owner_active) {
-            egp_error_set(&error, EGP_ERROR_BLE_UNAUTHORIZED, TRUE,
-                          EGP_PERSISTENT_CHANGE_NONE,
-                          "OperationResult has no authorized window owner");
-            return_error(invocation, &error);
-            return;
-        }
         bluez->notifying[export->characteristic] = enabled;
         emit_changed(bluez, export->characteristic, "Notifying",
                      g_variant_new_boolean(enabled));
@@ -425,8 +422,17 @@ static void method_call(GDBusConnection *connection, const char *sender,
                         const char *method_name, GVariant *parameters,
                         GDBusMethodInvocation *invocation, gpointer user_data)
 {
-    (void)connection; (void)sender; (void)object_path; (void)interface_name;
+    (void)connection; (void)object_path; (void)interface_name;
     Export *export = user_data;
+    if ((export->type == EXPORT_CHARACTERISTIC || export->type == EXPORT_AGENT ||
+         export->type == EXPORT_ADVERTISEMENT) &&
+        (!export->bluez->unique_owner[0] || !sender ||
+         strcmp(sender, export->bluez->unique_owner))) {
+        g_dbus_method_invocation_return_dbus_error(invocation,
+                                                   "org.bluez.Error.NotAuthorized",
+                                                   "Only the active BlueZ owner may invoke this object");
+        return;
+    }
     if (export->type == EXPORT_MANAGER)
         manager_call(export, invocation);
     else if (export->type == EXPORT_CHARACTERISTIC)
@@ -467,7 +473,8 @@ static GVariant *get_property(GDBusConnection *connection, const char *sender,
             return characteristic_flags(export->characteristic);
         if (!strcmp(property_name, "Notifying"))
             return g_variant_new_boolean(export->bluez->notifying[export->characteristic]);
-        if (!strcmp(property_name, "Value"))
+        if (!strcmp(property_name, "Value") &&
+            export->characteristic != EGP_BLUEZ_OPERATION_RESULT)
             return bytes_variant(export->bluez->values[export->characteristic]);
     } else if (export->type == EXPORT_ADVERTISEMENT) {
         if (!strcmp(property_name, "Type")) return g_variant_new_string("peripheral");
@@ -606,6 +613,38 @@ static gboolean discover_adapter(EgpBluez *bluez)
 
 static void register_bluez(EgpBluez *bluez);
 
+static guint64 next_epoch_locked(EgpBluez *bluez)
+{
+    bluez->next_peer_epoch++;
+    if (!bluez->next_peer_epoch)
+        bluez->next_peer_epoch++;
+    return bluez->next_peer_epoch;
+}
+
+static guint64 peer_epoch_locked(EgpBluez *bluez, const char *peer_path,
+                                 gboolean create)
+{
+    guint64 *stored = g_hash_table_lookup(bluez->peer_epochs, peer_path);
+    if (!stored && create) {
+        stored = g_new(guint64, 1);
+        *stored = next_epoch_locked(bluez);
+        g_hash_table_insert(bluez->peer_epochs, g_strdup(peer_path), stored);
+    }
+    return stored ? *stored : 0;
+}
+
+static void bump_peer_epoch(EgpBluez *bluez, const char *peer_path)
+{
+    g_mutex_lock(&bluez->peer_lock);
+    guint64 *stored = g_hash_table_lookup(bluez->peer_epochs, peer_path);
+    if (!stored) {
+        stored = g_new(guint64, 1);
+        g_hash_table_insert(bluez->peer_epochs, g_strdup(peer_path), stored);
+    }
+    *stored = next_epoch_locked(bluez);
+    g_mutex_unlock(&bluez->peer_lock);
+}
+
 static gboolean retry_registration(gpointer user_data)
 {
     EgpBluez *bluez = user_data;
@@ -660,8 +699,13 @@ static void register_bluez(EgpBluez *bluez)
 static void name_appeared(GDBusConnection *connection, const char *name,
                           const char *owner, gpointer user_data)
 {
-    (void)connection; (void)name; (void)owner;
+    (void)connection; (void)name;
     EgpBluez *bluez = user_data;
+    g_mutex_lock(&bluez->peer_lock);
+    g_strlcpy(bluez->unique_owner, owner, sizeof(bluez->unique_owner));
+    g_hash_table_remove_all(bluez->peer_epochs);
+    next_epoch_locked(bluez);
+    g_mutex_unlock(&bluez->peer_lock);
     bluez->bluez_present = TRUE;
     register_bluez(bluez);
 }
@@ -671,6 +715,11 @@ static void name_vanished(GDBusConnection *connection, const char *name,
 {
     (void)connection; (void)name;
     EgpBluez *bluez = user_data;
+    g_mutex_lock(&bluez->peer_lock);
+    memset(bluez->unique_owner, 0, sizeof(bluez->unique_owner));
+    g_hash_table_remove_all(bluez->peer_epochs);
+    next_epoch_locked(bluez);
+    g_mutex_unlock(&bluez->peer_lock);
     bluez->bluez_present = FALSE;
     bluez->application_registered = FALSE;
     bluez->advertisement_registered = FALSE;
@@ -681,7 +730,6 @@ static void name_vanished(GDBusConnection *connection, const char *name,
     }
     memset(bluez->adapter_path, 0, sizeof(bluez->adapter_path));
     memset(bluez->notifying, 0, sizeof(bluez->notifying));
-    bluez->result_owner_active = FALSE;
     if (bluez->handlers.bluez_lost)
         bluez->handlers.bluez_lost(bluez->handlers.user_data);
 }
@@ -699,8 +747,37 @@ static void properties_changed(GDBusConnection *connection, const char *sender,
     g_variant_get(parameters, "(&s@a{sv}@as)", &changed_interface,
                   &changed, &invalidated);
     gboolean connected = TRUE;
-    gboolean has_connected = !strcmp(changed_interface, BLUEZ_DEVICE) &&
+    gboolean device_change = !strcmp(changed_interface, BLUEZ_DEVICE);
+    gboolean has_connected = device_change &&
                              g_variant_lookup(changed, "Connected", "b", &connected);
+    gboolean security_change = has_connected;
+    const char *const epoch_properties[] = {
+        "Paired", "Bonded", "Address", "AddressType", "ServicesResolved"
+    };
+    for (guint i = 0; device_change && i < G_N_ELEMENTS(epoch_properties); ++i) {
+        GVariant *value = g_variant_lookup_value(changed, epoch_properties[i], NULL);
+        if (value) {
+            security_change = TRUE;
+            g_variant_unref(value);
+        }
+    }
+    GVariantIter invalidated_iter;
+    const char *invalidated_name = NULL;
+    g_variant_iter_init(&invalidated_iter, invalidated);
+    while (device_change && g_variant_iter_loop(&invalidated_iter, "&s",
+                                                 &invalidated_name)) {
+        if (!strcmp(invalidated_name, "Connected") ||
+            !strcmp(invalidated_name, "Paired") ||
+            !strcmp(invalidated_name, "Bonded") ||
+            !strcmp(invalidated_name, "Address") ||
+            !strcmp(invalidated_name, "AddressType") ||
+            !strcmp(invalidated_name, "ServicesResolved")) {
+            security_change = TRUE;
+            break;
+        }
+    }
+    if (security_change)
+        bump_peer_epoch(bluez, object_path);
     if (has_connected && !connected && bluez->handlers.peer_disconnected)
         bluez->handlers.peer_disconnected(bluez->handlers.user_data, object_path);
     g_variant_unref(changed);
@@ -725,6 +802,9 @@ EgpBluez *egp_bluez_new(GDBusConnection *connection,
     if (!connection || !handlers)
         return NULL;
     EgpBluez *bluez = g_new0(EgpBluez, 1);
+    g_mutex_init(&bluez->peer_lock);
+    bluez->peer_epochs = g_hash_table_new_full(g_str_hash, g_str_equal,
+                                               g_free, g_free);
     bluez->connection = g_object_ref(connection);
     bluez->handlers = *handlers;
     bluez->manager_info = parse_xml(manager_xml, error);
@@ -769,8 +849,6 @@ void egp_bluez_set_window(EgpBluez *bluez, gboolean open)
     if (!bluez)
         return;
     bluez->window_open = open;
-    if (!open)
-        egp_bluez_set_result_owner(bluez, FALSE);
     if (!bluez->bluez_present || !bluez->adapter_path[0])
         return;
     set_pairable(bluez, open);
@@ -788,27 +866,27 @@ void egp_bluez_set_window(EgpBluez *bluez, gboolean open)
     }
 }
 
-void egp_bluez_set_result_owner(EgpBluez *bluez, gboolean owner_active)
-{
-    if (!bluez)
-        return;
-    bluez->result_owner_active = owner_active;
-    if (!owner_active && bluez->notifying[EGP_BLUEZ_OPERATION_RESULT]) {
-        bluez->notifying[EGP_BLUEZ_OPERATION_RESULT] = FALSE;
-        emit_changed(bluez, EGP_BLUEZ_OPERATION_RESULT, "Notifying",
-                     g_variant_new_boolean(FALSE));
-    }
-}
-
 gboolean egp_bluez_peer_security(EgpBluez *bluez, const char *peer_path,
                                  EgpPeerSecurity *peer, EgpError *error)
 {
     if (!bluez || !peer_path || !g_variant_is_object_path(peer_path) || !peer)
         return FALSE;
     memset(peer, 0, sizeof(*peer));
+    char destination[sizeof(bluez->unique_owner)] = {0};
+    guint64 epoch_before = 0;
+    g_mutex_lock(&bluez->peer_lock);
+    g_strlcpy(destination, bluez->unique_owner, sizeof(destination));
+    epoch_before = peer_epoch_locked(bluez, peer_path, TRUE);
+    g_mutex_unlock(&bluez->peer_lock);
+    if (!destination[0] || !epoch_before) {
+        egp_error_set(error, EGP_ERROR_BLUEZ_UNAVAILABLE, TRUE,
+                      EGP_PERSISTENT_CHANGE_NONE,
+                      "Active BlueZ owner is unavailable");
+        return FALSE;
+    }
     GError *call_error = NULL;
     GVariant *reply = g_dbus_connection_call_sync(
-        bluez->connection, BLUEZ_BUS, peer_path, DBUS_PROPERTIES, "GetAll",
+        bluez->connection, destination, peer_path, DBUS_PROPERTIES, "GetAll",
         g_variant_new("(s)", BLUEZ_DEVICE), G_VARIANT_TYPE("(a{sv})"),
         G_DBUS_CALL_FLAGS_NONE, 2000, NULL, &call_error);
     if (!reply) {
@@ -831,9 +909,15 @@ gboolean egp_bluez_peer_security(EgpBluez *bluez, const char *peer_path,
                                          !strcmp(address_type, "random"));
     peer->stable_identity = has_address && has_type && peer->paired && peer->bonded;
     peer->encrypted_transport = TRUE; /* exported encrypt-* flag is the transport gate */
+    g_mutex_lock(&bluez->peer_lock);
+    guint64 epoch_after = peer_epoch_locked(bluez, peer_path, FALSE);
+    gboolean owner_stable = !strcmp(destination, bluez->unique_owner);
+    g_mutex_unlock(&bluez->peer_lock);
+    peer->connection_epoch = owner_stable && epoch_before == epoch_after
+                                 ? epoch_after : 0;
     g_variant_unref(properties);
     g_variant_unref(reply);
-    if (!peer->stable_identity) {
+    if (!peer->stable_identity || !peer->connection_epoch) {
         egp_error_set(error, EGP_ERROR_BLE_NOT_PAIRED, TRUE,
                       EGP_PERSISTENT_CHANGE_NONE,
                       "Peer lacks a stable paired bond identity");
@@ -903,6 +987,10 @@ void egp_bluez_publish(EgpBluez *bluez, EgpBluezCharacteristic characteristic,
                             characteristic != EGP_BLUEZ_OPERATION_RESULT) ||
         strlen(json) > EGP_PROTOCOL_MAX_JSON || !g_utf8_validate(json, -1, NULL))
         return;
+    /* BlueZ 5.77's StartNotify/StopNotify server callbacks carry no device
+     * identity, so OperationResult is deliberately owner-read-only. */
+    if (characteristic == EGP_BLUEZ_OPERATION_RESULT)
+        return;
     if (bluez->values[characteristic])
         g_bytes_unref(bluez->values[characteristic]);
     bluez->values[characteristic] = g_bytes_new(json, strlen(json));
@@ -946,6 +1034,8 @@ void egp_bluez_free(EgpBluez *bluez)
     if (bluez->characteristic_info) g_dbus_node_info_unref(bluez->characteristic_info);
     if (bluez->advertisement_info) g_dbus_node_info_unref(bluez->advertisement_info);
     if (bluez->agent_info) g_dbus_node_info_unref(bluez->agent_info);
+    if (bluez->peer_epochs) g_hash_table_unref(bluez->peer_epochs);
+    g_mutex_clear(&bluez->peer_lock);
     if (bluez->connection) g_object_unref(bluez->connection);
     g_free(bluez);
 }

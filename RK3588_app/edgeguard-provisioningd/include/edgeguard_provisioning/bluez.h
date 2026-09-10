@@ -45,7 +45,6 @@ EgpBluez *egp_bluez_new(GDBusConnection *connection,
                         const EgpBluezHandlers *handlers, EgpError *error);
 void egp_bluez_free(EgpBluez *bluez);
 void egp_bluez_set_window(EgpBluez *bluez, gboolean open);
-void egp_bluez_set_result_owner(EgpBluez *bluez, gboolean owner_active);
 gboolean egp_bluez_peer_security(EgpBluez *bluez, const char *peer_path,
                                  EgpPeerSecurity *peer, EgpError *error);
 void egp_bluez_disconnect_non_owner(EgpBluez *bluez, const char *owner_path);

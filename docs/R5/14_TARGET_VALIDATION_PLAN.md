@@ -49,7 +49,7 @@ After automatic boot into the candidate, prove `/userdata` retained the canonica
 - prove there is no direct RAUC, reboot, bundle URL, or boot-control action;
 - for every matrix row, host-verify the decision; on target, safely sample busy/critical states such as `DOWNLOADING` and `INSTALLING` only within an approved OTA campaign;
 - prove mutations and duplicate checks return busy/rejected without changing persistent provisioning or disturbing the attempt;
-- disconnect mid-fragment and mid-notification; prove only complete committed transactions survive.
+- disconnect mid-fragment and mid-RuntimeStatus notification; prove only complete committed transactions survive and OperationResult remains owner-read-only.
 
 ## Verdict boundary
 

@@ -15,6 +15,9 @@ typedef struct {
     /* True only when the call arrived through a BlueZ characteristic whose
      * exported flag requires link encryption. */
     gboolean encrypted_transport;
+    /* Changes whenever BlueZ ownership or this peer's connection/security
+     * properties change. Zero is never a valid accepted-write epoch. */
+    guint64 connection_epoch;
 } EgpPeerSecurity;
 
 typedef void (*EgpWindowChanged)(gpointer user_data, gboolean open);
@@ -27,6 +30,7 @@ void egp_security_close_window(EgpSecurity *security);
 void egp_security_bluez_lost(EgpSecurity *security);
 gboolean egp_security_window_open(EgpSecurity *security, gint64 now_us);
 const char *egp_security_owner(EgpSecurity *security);
+guint64 egp_security_window_epoch(EgpSecurity *security);
 
 /* Pairing is allowed only while the physical-presence window is open and no
  * different owner exists. This callback never permanently authorizes a bond. */
@@ -42,6 +46,12 @@ gboolean egp_security_authorize_sensitive(EgpSecurity *security,
                                           const EgpPeerSecurity *peer,
                                           gboolean claim_if_unowned,
                                           gint64 now_us, EgpError *error);
+gboolean egp_security_authorize_commit(EgpSecurity *security,
+                                       const char *peer_path,
+                                       const EgpPeerSecurity *peer,
+                                       guint64 expected_window_epoch,
+                                       guint64 expected_connection_epoch,
+                                       gint64 now_us, EgpError *error);
 gboolean egp_security_can_read_runtime(EgpSecurity *security,
                                        const EgpPeerSecurity *peer,
                                        EgpError *error);

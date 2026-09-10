@@ -18,7 +18,8 @@ static EgpPeerSecurity eligible_peer(void)
         .paired = TRUE,
         .bonded = TRUE,
         .stable_identity = TRUE,
-        .encrypted_transport = TRUE
+        .encrypted_transport = TRUE,
+        .connection_epoch = 1
     };
     return peer;
 }
@@ -89,6 +90,37 @@ static void bluez_loss_revokes_owner(void)
     egp_security_free(security);
 }
 
+static void commit_requires_same_epochs(void)
+{
+    EgpSecurity *security = egp_security_new(NULL, NULL);
+    EgpPeerSecurity peer = eligible_peer();
+    EgpError error = {0};
+    gint64 now = g_get_monotonic_time();
+    egp_security_open_window(security, now);
+    g_assert_true(egp_security_authorize_sensitive(
+        security, "/org/bluez/hci0/dev_AA", &peer, TRUE, now + 1, &error));
+    guint64 window_epoch = egp_security_window_epoch(security);
+    g_assert_cmpuint(window_epoch, >, 0);
+    g_assert_true(egp_security_authorize_commit(
+        security, "/org/bluez/hci0/dev_AA", &peer, window_epoch,
+        peer.connection_epoch, now + 2, &error));
+
+    peer.connection_epoch++;
+    g_assert_false(egp_security_authorize_commit(
+        security, "/org/bluez/hci0/dev_AA", &peer, window_epoch,
+        1, now + 3, &error));
+    g_assert_cmpint(error.code, ==, EGP_ERROR_BLE_UNAUTHORIZED);
+
+    peer.connection_epoch = 1;
+    egp_security_close_window(security);
+    egp_security_open_window(security, now + 4);
+    g_assert_false(egp_security_authorize_commit(
+        security, "/org/bluez/hci0/dev_AA", &peer, window_epoch,
+        peer.connection_epoch, now + 5, &error));
+    g_assert_cmpint(error.code, ==, EGP_ERROR_BLE_UNAUTHORIZED);
+    egp_security_free(security);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -96,5 +128,6 @@ int main(int argc, char **argv)
     g_test_add_func("/security/single-owner", single_owner);
     g_test_add_func("/security/fail-closed-properties", fail_closed_properties);
     g_test_add_func("/security/bluez-loss", bluez_loss_revokes_owner);
+    g_test_add_func("/security/commit-epochs", commit_requires_same_epochs);
     return g_test_run();
 }

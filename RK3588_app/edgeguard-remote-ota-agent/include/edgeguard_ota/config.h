@@ -2,8 +2,11 @@
 #define EDGEGUARD_OTA_CONFIG_H
 #include "model.h"
 
+#define OTA_ENDPOINT_MAX_BYTES 512u
+
 typedef struct {
-    char base_url[OTA_PATH_CAP], manifest_path[OTA_PATH_CAP], report_path[OTA_PATH_CAP];
+    char base_url[OTA_ENDPOINT_MAX_BYTES + 1u];
+    char manifest_path[OTA_PATH_CAP], report_path[OTA_PATH_CAP];
     uint32_t poll_interval_sec, connect_timeout_sec, request_timeout_sec;
     char state_dir[OTA_PATH_CAP], release_file[OTA_PATH_CAP];
     uint32_t max_manifest_bytes;

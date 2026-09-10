@@ -34,7 +34,7 @@ registrations without opening a closed window.
 | char0 DeviceInfo | `6a174d82-0b81-5fa2-bca8-1cef78011280` | `read` |
 | char1 RuntimeStatus | `ed5101e3-0964-5afa-b52c-c653c2c1e3ca` | `encrypt-read`, `notify` |
 | char2 ProvisioningRequest | `9f6e55ea-003a-5254-95dd-5806ad2fb97d` | `encrypt-write`, `authorize` |
-| char3 OperationResult | `6b26b3c6-d089-5b53-9fea-5e5524ce169c` | `encrypt-read`, `notify` |
+| char3 OperationResult | `6b26b3c6-d089-5b53-9fea-5e5524ce169c` | `encrypt-read` (owner-only read; BlueZ 5.77 has no per-peer notify callback identity) |
 | char4 ControlRequest | `413bd486-a58e-5947-b570-9cffba5eec5c` | `encrypt-write`, `authorize` |
 
 The advertisement contains only `Type=peripheral`, local name

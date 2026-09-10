@@ -36,6 +36,10 @@ typedef struct {
     char peer_path[EGP_DBUS_PATH_CAP];
     EgpWritableCharacteristic characteristic;
     guint8 transaction_id[16];
+    /* Volatile authorization tokens captured from the encrypted GATT write.
+     * They are never supplied by the peer or serialized on either wire. */
+    guint64 window_epoch;
+    guint64 connection_epoch;
     guint8 opcode;
     guint16 json_length;
     char json[EGP_PROTOCOL_MAX_JSON + 1u];

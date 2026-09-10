@@ -97,7 +97,7 @@ static gboolean parse_request(const char *data, gsize length,
     char command[32] = {0};
     ok = object &&
          string_member(object, "request_id", request_id, OTA_UUID_CAP) &&
-         ota_uuid_valid(request_id, TRUE) &&
+         ota_uuid_valid(request_id, FALSE) &&
          json_object_get_size(object) == 3 && version &&
          JSON_NODE_HOLDS_VALUE(version) &&
          json_node_get_value_type(version) == G_TYPE_INT64 &&
@@ -174,7 +174,7 @@ static void cache_decision(OtaControl *control, const char *request_id,
 static void send_response(int fd, const char *request_id,
                           const char *status, const char *error)
 {
-    const char *id = ota_uuid_valid(request_id, TRUE)
+    const char *id = ota_uuid_valid(request_id, FALSE)
                          ? request_id : "00000000-0000-0000-0000-000000000000";
     char json[256];
     g_snprintf(json, sizeof(json),
@@ -216,7 +216,7 @@ static void handle_client(OtaControl *control, int client)
         return;
     char request_id[OTA_UUID_CAP] = {0};
     if (!parse_request(request, length, request_id)) {
-        if (ota_uuid_valid(request_id, TRUE))
+        if (ota_uuid_valid(request_id, FALSE))
             send_response(client, request_id, "REJECTED", "OTA_CONTROL_REJECTED");
         return;
     }

@@ -26,7 +26,7 @@ Thread 1 freezes the public headers consumed by Threads 2 and 3.
 - implement `edgeguard-provisioningd` main loop and GDBus objects;
 - register GATT application, advertisement, and pairing agent;
 - implement physical-presence window and per-peer authorization;
-- implement framed protocol, transactions, result notifications, and status serialization;
+- implement framed protocol, transactions, owner-authorized result reads, and status serialization/notifications;
 - call Thread 1 APIs without changing Thread 1 backend semantics.
 
 ### Thread 3 — integration

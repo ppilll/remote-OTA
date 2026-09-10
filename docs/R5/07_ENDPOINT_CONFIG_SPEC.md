@@ -16,7 +16,7 @@ The provisioning daemon owns and validates `runtime.json`. The OTA Agent may rea
 
 ## Canonical base URL
 
-Accepted schemes are `http` and syntactically valid `https`. R5 target success over HTTPS is not claimed until a trust-store/TLS campaign exists. The maximum serialized URL length is 2048 bytes.
+Accepted schemes are `http` and syntactically valid `https`. R5 target success over HTTPS is not claimed until a trust-store/TLS campaign exists. The maximum serialized base URL length is 512 bytes. This fits inside the frozen 1024-byte GATT request, RuntimeStatus, OperationResult, and Agent IPC JSON envelopes with their required schema fields; the same bound is enforced by the provisioning request parser, canonical store, Agent cycle snapshot, and status/result serializers.
 
 Requirements:
 

@@ -31,6 +31,8 @@ struct _EgpStatus {
     char build_id[EGP_MESSAGE_CAP];
     gboolean runtime_available;
     char endpoint[EGP_ENDPOINT_MAX_BYTES + 1u];
+    char endpoint_source[32];
+    gboolean runtime_config_invalid;
     gboolean agent_available;
     char agent_state[32];
     char attempt_id[37];
@@ -357,8 +359,10 @@ void egp_status_refresh(EgpStatus *status)
     gboolean present = FALSE;
     EgpError ignored = {0};
     gboolean runtime_ok = egp_store_load_runtime(status->store, &runtime,
-                                                 &present, &ignored);
+                                                  &present, &ignored);
     gboolean endpoint_available = runtime_ok && present;
+    const char *endpoint_source = endpoint_available ? "runtime_override" :
+                                                       "immutable_default";
     char effective_endpoint[EGP_ENDPOINT_MAX_BYTES + 1u] = {0};
     if (endpoint_available) {
         g_strlcpy(effective_endpoint, runtime.ota_server_base_url,
@@ -391,11 +395,16 @@ void egp_status_refresh(EgpStatus *status)
     gboolean slot_available = read_slot(slot);
     g_mutex_lock(&status->lock);
     status->runtime_available = endpoint_available &&
-                                strlen(effective_endpoint) <= 512u;
+                                strlen(effective_endpoint) <= EGP_ENDPOINT_MAX_BYTES;
     memset(status->endpoint, 0, sizeof(status->endpoint));
+    memset(status->endpoint_source, 0, sizeof(status->endpoint_source));
     if (status->runtime_available)
         g_strlcpy(status->endpoint, effective_endpoint,
                   sizeof(status->endpoint));
+    if (status->runtime_available)
+        g_strlcpy(status->endpoint_source, endpoint_source,
+                  sizeof(status->endpoint_source));
+    status->runtime_config_invalid = !runtime_ok;
     status->slot_available = slot_available;
     memset(status->current_slot, 0, sizeof(status->current_slot));
     if (slot_available)
@@ -509,6 +518,10 @@ gboolean egp_status_runtime_json(EgpStatus *status,
     json_builder_add_boolean_value(builder, status->runtime_available);
     if (status->runtime_available)
         ADD_STRING(builder, "effective_endpoint", status->endpoint);
+    if (status->runtime_available)
+        ADD_STRING(builder, "effective_endpoint_source", status->endpoint_source);
+    if (status->runtime_config_invalid)
+        ADD_STRING(builder, "runtime_config_error", "ENDPOINT_CONFIG_INVALID");
     json_builder_set_member_name(builder, "agent_state_available");
     json_builder_add_boolean_value(builder, status->agent_available);
     if (status->agent_available) {
@@ -558,11 +571,10 @@ static gboolean read_all(int fd, void *buffer, gsize length)
 
 static void ipc_request_id(const guint8 transaction_id[16], char output[37])
 {
-    guint8 id[16];
-    memcpy(id, transaction_id, sizeof(id));
-    id[6] = (guint8)((id[6] & 0x0f) | 0x40);
-    id[8] = (guint8)((id[8] & 0x3f) | 0x80);
-    egp_transaction_id_format(id, output);
+    /* The IPC contract requires canonical UUID text, not UUIDv4. Formatting
+     * the opaque 128-bit GATT ID verbatim is injective; forcing version and
+     * variant bits would deterministically collapse 64 distinct IDs. */
+    egp_transaction_id_format(transaction_id, output);
 }
 
 gboolean egp_status_check_update_now(EgpStatus *status,

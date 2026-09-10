@@ -7,6 +7,8 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+G_STATIC_ASSERT(OTA_ENDPOINT_MAX_BYTES == EGP_ENDPOINT_MAX_BYTES);
+
 static void endpoint_diagnostic(OtaError *error, const char *message)
 {
     ota_error_set(error, OTA_ERROR_ENDPOINT_CONFIG_INVALID, "%s", message);

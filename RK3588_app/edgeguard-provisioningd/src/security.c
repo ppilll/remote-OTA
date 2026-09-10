@@ -6,11 +6,19 @@ struct _EgpSecurity {
     GMutex lock;
     gboolean open;
     gint64 deadline_us;
+    guint64 window_epoch;
     char owner[EGP_DBUS_PATH_CAP];
     guint expiry_source;
     EgpWindowChanged changed;
     gpointer user_data;
 };
+
+static void advance_epoch(EgpSecurity *security)
+{
+    security->window_epoch++;
+    if (!security->window_epoch)
+        security->window_epoch++;
+}
 
 static gboolean deny(EgpError *error, EgpErrorCode code, const char *message)
 {
@@ -31,6 +39,7 @@ static gboolean expiry_tick(gpointer user_data)
     if (g_get_monotonic_time() >= security->deadline_us) {
         security->open = FALSE;
         security->deadline_us = 0;
+        advance_epoch(security);
         memset(security->owner, 0, sizeof(security->owner));
         security->expiry_source = 0;
         notify = TRUE;
@@ -68,6 +77,7 @@ void egp_security_open_window(EgpSecurity *security, gint64 now_us)
     g_mutex_lock(&security->lock);
     security->open = TRUE;
     security->deadline_us = now_us + EGP_WINDOW_DURATION_US;
+    advance_epoch(security);
     memset(security->owner, 0, sizeof(security->owner));
     if (!security->expiry_source)
         security->expiry_source = g_timeout_add(250, expiry_tick, security);
@@ -85,6 +95,8 @@ void egp_security_close_window(EgpSecurity *security)
     notify = security->open || security->owner[0];
     security->open = FALSE;
     security->deadline_us = 0;
+    if (notify)
+        advance_epoch(security);
     memset(security->owner, 0, sizeof(security->owner));
     guint source = security->expiry_source;
     security->expiry_source = 0;
@@ -100,6 +112,7 @@ void egp_security_bluez_lost(EgpSecurity *security)
     if (!security)
         return;
     g_mutex_lock(&security->lock);
+    advance_epoch(security);
     memset(security->owner, 0, sizeof(security->owner));
     g_mutex_unlock(&security->lock);
 }
@@ -119,6 +132,16 @@ gboolean egp_security_window_open(EgpSecurity *security, gint64 now_us)
 const char *egp_security_owner(EgpSecurity *security)
 {
     return security && security->owner[0] ? security->owner : NULL;
+}
+
+guint64 egp_security_window_epoch(EgpSecurity *security)
+{
+    if (!security)
+        return 0;
+    g_mutex_lock(&security->lock);
+    guint64 epoch = security->window_epoch;
+    g_mutex_unlock(&security->lock);
+    return epoch;
 }
 
 gboolean egp_security_allow_pairing(EgpSecurity *security,
@@ -183,6 +206,36 @@ gboolean egp_security_authorize_sensitive(EgpSecurity *security,
     if (!authorized)
         return deny(error, EGP_ERROR_BLE_UNAUTHORIZED,
                     "Peer does not own the current provisioning window");
+    egp_error_clear(error);
+    return TRUE;
+}
+
+gboolean egp_security_authorize_commit(EgpSecurity *security,
+                                       const char *peer_path,
+                                       const EgpPeerSecurity *peer,
+                                       guint64 expected_window_epoch,
+                                       guint64 expected_connection_epoch,
+                                       gint64 now_us, EgpError *error)
+{
+    if (!security || !peer_path || !g_variant_is_object_path(peer_path) ||
+        !expected_window_epoch || !expected_connection_epoch ||
+        !peer_eligible(peer, error))
+        return FALSE;
+    if (peer->connection_epoch != expected_connection_epoch)
+        return deny(error, EGP_ERROR_BLE_UNAUTHORIZED,
+                    "Peer connection/security epoch changed before commit");
+
+    g_mutex_lock(&security->lock);
+    gboolean open = security->open && now_us > 0 && now_us < security->deadline_us;
+    gboolean authorized = open && security->window_epoch == expected_window_epoch &&
+                          security->owner[0] && !strcmp(security->owner, peer_path);
+    g_mutex_unlock(&security->lock);
+    if (!open)
+        return deny(error, EGP_ERROR_BLE_WINDOW_CLOSED,
+                    "Physical-presence window is closed");
+    if (!authorized)
+        return deny(error, EGP_ERROR_BLE_UNAUTHORIZED,
+                    "Provisioning authorization epoch changed before commit");
     egp_error_clear(error);
     return TRUE;
 }

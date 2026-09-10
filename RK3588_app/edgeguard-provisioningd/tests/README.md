@@ -7,9 +7,12 @@ execute them.
 - `test_protocol.c` covers framing, fragmentation, duplicate fragments,
   conflicting overlap, timeout, completed replay, and conflicting ID reuse.
 - `test_security.c` covers closed default, encrypted/bonded fail-closed checks,
-  single-window ownership, close cleanup, and BlueZ-owner loss.
+  single-window ownership, commit epochs, close cleanup, and BlueZ-owner loss.
 - `test_thread2_contract.py` freezes the UUID/object registry, security flags,
   protocol bounds, fixed read-only slot command, and forbidden OTA/shell calls.
+- `test_r5_review_regressions.py` covers ConnMan owner reconciliation and
+  revoke ownership, BlueZ owner/epoch gates, collision-free IPC request IDs,
+  endpoint bounds/result schema, and the real R4 documentation references.
 
 Later host verification should link the C tests with GLib/GIO/JSON-GLib and the
 Thread 1 model/error implementation, then separately exercise GDBus against a

@@ -24,6 +24,11 @@ typedef struct {
     char last_result[EGP_PROTOCOL_MAX_JSON + 1u];
     guint refresh_source;
     guint expire_source;
+    guint connman_watch;
+    guint connman_retry_source;
+    guint connman_retry_attempt;
+    gboolean connman_present;
+    gboolean shutting_down;
 } Daemon;
 
 static gboolean stop_daemon(gpointer user_data)
@@ -39,11 +44,13 @@ static void window_changed(gpointer user_data, gboolean open)
     Daemon *daemon = user_data;
     if (daemon->bluez)
         egp_bluez_set_window(daemon->bluez, open);
-    if (!open) {
-        egp_protocol_drop_all(daemon->protocol);
-        memset(daemon->result_peer, 0, sizeof(daemon->result_peer));
-        memset(daemon->last_result, 0, sizeof(daemon->last_result));
-    }
+    /* Opening an already-open window also advances the authorization epoch.
+     * Never carry a transaction or result binding across that boundary. */
+    egp_protocol_drop_all(daemon->protocol);
+    daemon->active_valid = FALSE;
+    memset(&daemon->active_request, 0, sizeof(daemon->active_request));
+    memset(daemon->result_peer, 0, sizeof(daemon->result_peer));
+    memset(daemon->last_result, 0, sizeof(daemon->last_result));
 }
 
 static void physical_presence(gpointer user_data)
@@ -65,13 +72,16 @@ static gboolean peer_security(Daemon *daemon, const char *peer_path,
 }
 
 static gboolean authorize_commit(gpointer user_data, const char *peer_path,
-                                 EgpError *error)
+                                  guint64 window_epoch,
+                                  guint64 connection_epoch,
+                                  EgpError *error)
 {
     Daemon *daemon = user_data;
     EgpPeerSecurity peer;
     return peer_security(daemon, peer_path, &peer, error) &&
-           egp_security_authorize_sensitive(daemon->security, peer_path, &peer,
-                                            FALSE, g_get_monotonic_time(), error);
+           egp_security_authorize_commit(daemon->security, peer_path, &peer,
+                                         window_epoch, connection_epoch,
+                                         g_get_monotonic_time(), error);
 }
 
 static gboolean close_one_shot(gpointer user_data)
@@ -197,7 +207,6 @@ static gboolean write_value(gpointer user_data, EgpBluezCharacteristic character
         return FALSE;
     }
     if (claiming) {
-        egp_bluez_set_result_owner(daemon->bluez, TRUE);
         egp_bluez_disconnect_non_owner(daemon->bluez, peer_path);
     }
     if (output.disposition == EGP_PROTOCOL_INCOMPLETE)
@@ -213,6 +222,8 @@ static gboolean write_value(gpointer user_data, EgpBluezCharacteristic character
         memset(&output, 0, sizeof(output));
         return TRUE;
     }
+    output.request.window_epoch = egp_security_window_epoch(daemon->security);
+    output.request.connection_epoch = peer.connection_epoch;
     daemon->active_request = output.request;
     memset(daemon->active_request.json, 0,
            sizeof(daemon->active_request.json));
@@ -253,6 +264,84 @@ static void peer_disconnected(gpointer user_data, const char *peer_path)
     egp_protocol_drop_peer(daemon->protocol, peer_path);
 }
 
+#define CONNMAN_RECONCILE_MAX_ATTEMPTS 6u
+
+static gboolean connman_reconcile_retry(gpointer user_data);
+
+static void schedule_connman_reconcile(Daemon *daemon)
+{
+    if (!daemon || daemon->shutting_down || !daemon->connman_present ||
+        daemon->connman_retry_source ||
+        daemon->connman_retry_attempt >= CONNMAN_RECONCILE_MAX_ATTEMPTS)
+        return;
+    guint delay = daemon->connman_retry_attempt == 0 ? 1u :
+        egp_connman_retry_delay_ms(daemon->connman_retry_attempt - 1u,
+                                   g_random_int());
+    daemon->connman_retry_source = g_timeout_add(delay,
+                                                 connman_reconcile_retry,
+                                                 daemon);
+}
+
+static void connman_reconciled(gpointer user_data, EgpErrorCode code)
+{
+    Daemon *daemon = user_data;
+    if (!daemon || daemon->shutting_down)
+        return;
+    if (code == EGP_ERROR_NONE) {
+        daemon->connman_retry_attempt = 0;
+        return;
+    }
+    if (code == EGP_ERROR_CONNMAN_UNAVAILABLE ||
+        code == EGP_ERROR_CONNMAN_APPLY_FAILED ||
+        code == EGP_ERROR_WIFI_CONNECT_TIMEOUT ||
+        code == EGP_ERROR_AGENT_BUSY ||
+        code == EGP_ERROR_PROVISIONING_BUSY)
+        schedule_connman_reconcile(daemon);
+}
+
+static gboolean connman_reconcile_retry(gpointer user_data)
+{
+    Daemon *daemon = user_data;
+    daemon->connman_retry_source = 0;
+    if (daemon->shutting_down || !daemon->connman_present)
+        return G_SOURCE_REMOVE;
+    daemon->connman_retry_attempt++;
+    EgpError error = {0};
+    if (!egp_operations_reconcile(daemon->operations, connman_reconciled,
+                                  daemon, &error))
+        connman_reconciled(daemon, error.code);
+    return G_SOURCE_REMOVE;
+}
+
+static void connman_appeared(GDBusConnection *connection, const char *name,
+                             const char *owner, gpointer user_data)
+{
+    (void)connection;
+    (void)name;
+    (void)owner;
+    Daemon *daemon = user_data;
+    daemon->connman_present = TRUE;
+    daemon->connman_retry_attempt = 0;
+    schedule_connman_reconcile(daemon);
+}
+
+static void connman_vanished(GDBusConnection *connection, const char *name,
+                             gpointer user_data)
+{
+    (void)connection;
+    (void)name;
+    Daemon *daemon = user_data;
+    daemon->connman_present = FALSE;
+    daemon->connman_retry_attempt = 0;
+    if (daemon->connman_retry_source) {
+        g_source_remove(daemon->connman_retry_source);
+        daemon->connman_retry_source = 0;
+    }
+    egp_operations_connman_lost(daemon->operations);
+    egp_status_set_provisioning(daemon->status,
+                                EGP_STATE_FAILED_DEPENDENCY, FALSE);
+}
+
 static gboolean refresh_status(gpointer user_data)
 {
     Daemon *daemon = user_data;
@@ -270,39 +359,6 @@ static gboolean expire_protocol(gpointer user_data)
     Daemon *daemon = user_data;
     egp_protocol_expire(daemon->protocol, g_get_monotonic_time());
     return G_SOURCE_CONTINUE;
-}
-
-static void startup_reconcile(Daemon *daemon)
-{
-    EgpError error = {0};
-    EgpWifiConfig wifi = {0};
-    gboolean pending = FALSE;
-    if (egp_store_forget_pending(daemon->store, &wifi, &pending, &error) && pending) {
-        EgpConnmanResult result = {0};
-        if (egp_connman_revoke(daemon->connman, &wifi, 30000, NULL,
-                               &result, &error) &&
-            egp_store_forget_finish(daemon->store, &error))
-            egp_status_set_provisioning(daemon->status,
-                                        EGP_STATE_UNPROVISIONED, FALSE);
-        else
-            egp_status_set_provisioning(daemon->status,
-                                        EGP_STATE_FAILED_DEPENDENCY, FALSE);
-        egp_wifi_clear(&wifi);
-        return;
-    }
-    egp_wifi_clear(&wifi);
-    gboolean present = FALSE;
-    if (!egp_store_load_wifi(daemon->store, &wifi, &present, &error)) {
-        egp_status_set_provisioning(daemon->status, EGP_STATE_FAILED_CONFIG, FALSE);
-    } else if (!present) {
-        egp_status_set_provisioning(daemon->status, EGP_STATE_UNPROVISIONED, FALSE);
-    } else if (!egp_connman_write_profile(daemon->connman, &wifi, &error)) {
-        egp_status_set_provisioning(daemon->status,
-                                    EGP_STATE_FAILED_DEPENDENCY, FALSE);
-    } else {
-        egp_status_set_provisioning(daemon->status, EGP_STATE_STORED, FALSE);
-    }
-    egp_wifi_clear(&wifi);
 }
 
 static gboolean parse_uint(const char *value, guint *output)
@@ -367,7 +423,6 @@ int main(int argc, char **argv)
                       "Provisioning daemon initialization failed");
         goto failed;
     }
-    startup_reconcile(&daemon);
     egp_status_refresh(daemon.status);
     EgpBluezHandlers handlers = {
         .user_data = &daemon,
@@ -389,6 +444,9 @@ int main(int argc, char **argv)
                       "Operation worker initialization failed");
         goto failed;
     }
+    daemon.connman_watch = g_bus_watch_name_on_connection(
+        daemon.connection, "net.connman", G_BUS_NAME_WATCHER_FLAGS_NONE,
+        connman_appeared, connman_vanished, &daemon, NULL);
     daemon.input = egp_input_new(key_code, hold_ms, physical_presence,
                                  input_lost, &daemon, &error);
     if (!daemon.input) {
@@ -407,6 +465,9 @@ int main(int argc, char **argv)
 failed:
     g_printerr("%s: %s\n", egp_error_code_name(error.code), error.message);
 done:
+    daemon.shutting_down = TRUE;
+    if (daemon.connman_watch) g_bus_unwatch_name(daemon.connman_watch);
+    if (daemon.connman_retry_source) g_source_remove(daemon.connman_retry_source);
     if (daemon.refresh_source) g_source_remove(daemon.refresh_source);
     if (daemon.expire_source) g_source_remove(daemon.expire_source);
     egp_input_free(daemon.input);

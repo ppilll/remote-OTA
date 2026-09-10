@@ -17,12 +17,12 @@ Physical presence supplies the additional local authorization factor. The input 
 - default boot state: closed, not pairable, not advertising;
 - while open: pairable and provisioning advertisement enabled;
 - close conditions: timeout, explicit local close, daemon shutdown, input-source loss, or successful sensitive operation if policy is configured one-shot;
-- on close: stop advertising, set pairable false, revoke in-memory provisioning authorization, discard incomplete transactions, and reject new sensitive writes;
+- on every window epoch change (open, reopen, or close): discard prior transactions, active request binding, and cached OperationResult; on close also stop advertising, set pairable false, revoke in-memory provisioning authorization, and reject new sensitive writes;
 - wall-clock changes never extend the window.
 
 The window may be reopened only by a new physical-presence event. Being unprovisioned does not by itself open an unlimited advertising window.
 
-Only one peer is provisioning-authorized per window. The first eligible bonded/encrypted peer that completes application authorization becomes the window owner; pairability is then disabled and other peers' sensitive writes are rejected. An existing bond is only an input to this selection, never permanent authorization. Closing the window clears the owner. This single-owner rule also makes OperationResult notifications unambiguous.
+Only one peer is provisioning-authorized per window. The first eligible bonded/encrypted peer that completes application authorization becomes the window owner; pairability is then disabled and other peers' sensitive writes are rejected. An existing bond is only an input to this selection, never permanent authorization. Closing the window clears the owner. OperationResult is owner-only encrypted read because BlueZ 5.77 does not expose peer identity to application-side notification callbacks.
 
 ## Advertising policy
 
@@ -45,7 +45,7 @@ AND operation is allowed by the concurrency policy
 
 `Connected=true`, `Paired=true`, or `Trusted=true` alone is never sufficient. The daemon's current-window authorization is volatile and is cleared on window close, BlueZ ownership loss, or daemon restart. BlueZ `Trusted` may be managed for bond lifecycle but is not the application authorization database.
 
-DeviceInfo is the only unpaired read and contains no secrets. RuntimeStatus and OperationResult require an encrypted link. All writes use `encrypt-write` plus `authorize`. Do not change to `encrypt-authenticated-write` unless later target evidence proves compatible authenticated pairing behavior and the policy is formally revised.
+DeviceInfo is the only unpaired read and contains no secrets. RuntimeStatus and OperationResult require an encrypted link. All writes use `encrypt-write` plus `authorize`. The daemon accepts characteristic and Agent method calls only from the current unique `org.bluez` bus owner, and binds commit authorization to the same window and peer connection/security epochs captured by the accepted encrypted write. Do not change to `encrypt-authenticated-write` unless later target evidence proves compatible authenticated pairing behavior and the policy is formally revised.
 
 ## Pairing and bond rules
 

@@ -10,7 +10,7 @@ Protocol version is integer `1`. These UUIDs are permanent ABI values and must n
 | DeviceInfo | `6a174d82-0b81-5fa2-bca8-1cef78011280` | read | `read` |
 | RuntimeStatus | `ed5101e3-0964-5afa-b52c-c653c2c1e3ca` | read, notify | `encrypt-read` |
 | ProvisioningRequest | `9f6e55ea-003a-5254-95dd-5806ad2fb97d` | write | `encrypt-write`, `authorize` |
-| OperationResult | `6b26b3c6-d089-5b53-9fea-5e5524ce169c` | read, notify | `encrypt-read` |
+| OperationResult | `6b26b3c6-d089-5b53-9fea-5e5524ce169c` | read | `encrypt-read` |
 | ControlRequest | `413bd486-a58e-5947-b570-9cffba5eec5c` | write | `encrypt-write`, `authorize` |
 
 The application exports `org.freedesktop.DBus.ObjectManager`, one `org.bluez.GattService1`, and the five `org.bluez.GattCharacteristic1` objects. It registers the root with `GattManager1.RegisterApplication`.
@@ -33,7 +33,7 @@ RuntimeStatus fields are a bounded subset of:
 
 Missing or unreadable sources are represented with an explicit `*_available:false` field or a typed error; values are never guessed. RuntimeStatus is not an OTA state authority.
 
-OperationResult belongs to the single provisioning-authorized window owner and includes `transaction_id`, `operation`, `status` (`ACCEPTED`, `IN_PROGRESS`, `SUCCEEDED`, `FAILED`), and stable `error_code`. A peer must not receive another peer's result; notifications are disabled when no window owner exists.
+OperationResult belongs to the single provisioning-authorized window owner and includes `transaction_id`, `operation`, `status` (`ACCEPTED`, `IN_PROGRESS`, `SUCCEEDED`, `FAILED`), and stable `error_code`. A peer must not receive another peer's result. On BlueZ 5.77 the application-side `StartNotify`/`StopNotify` methods carry no device identity, and a `PropertiesChanged(Value)` publication cannot be directed to one peer. OperationResult therefore fails closed as an owner-authorized encrypted read and is never placed in the public D-Bus `Value` property. Its UUID is unchanged.
 
 ## Write framing
 
@@ -63,7 +63,7 @@ Exact duplicate fragments are idempotent. Overlap containing different bytes, ga
 ProvisioningRequest:
 
 - `0x01 SET_WIFI`: `{"ssid":"...","security":"psk","passphrase":"...","hidden":false}`
-- `0x02 SET_ENDPOINT`: `{"base_url":"http://host:port"}`
+- `0x02 SET_ENDPOINT`: `{"base_url":"http://host:port"}` (base URL maximum 512 bytes)
 - `0x03 FORGET_WIFI`: `{}`
 
 ControlRequest:
@@ -78,7 +78,7 @@ No opcode exists for bundle transfer, direct URL download, RAUC, reboot, boot-sl
 
 Authorization and concurrency are checked again at commit, not only on the first fragment. A complete request is validated before any persistent mutation. `SET_WIFI` commits one complete credential object; SSID and passphrase are never independently applied. An invalid request leaves the previous working configuration unchanged.
 
-Writes return only acceptance of the ATT write. Final application results are delivered through OperationResult read/notify. Notifications are hints; a peer may read the latest result after reconnect when still authorized and the cached result exists.
+Writes return only acceptance of the ATT write. Final application results are delivered through OperationResult read. A peer may read the latest result after reconnect when still authorized in the same provisioning window and the cached result exists.
 
 ## BlueZ method behavior
 

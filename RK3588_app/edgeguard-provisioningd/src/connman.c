@@ -12,6 +12,7 @@
 #define CONNMAN_MANAGER_IFACE "net.connman.Manager"
 #define CONNMAN_TECH_IFACE "net.connman.Technology"
 #define CONNMAN_SERVICE_IFACE "net.connman.Service"
+#define CONNMAN_OWNER_CAP 256u
 
 struct _EgpConnman {
     GDBusConnection *connection;
@@ -314,6 +315,13 @@ gboolean egp_connman_remove_profile(EgpConnman *connman, EgpError *error)
     return TRUE;
 }
 
+static gboolean owned_profile_present(EgpConnman *connman)
+{
+    struct stat st;
+    return connman && lstat(connman->profile_path, &st) == 0 &&
+           private_regular(&st) && (st.st_mode & 0777) == 0600;
+}
+
 static gint remaining_ms(gint64 deadline_us)
 {
     gint64 remaining = deadline_us - g_get_monotonic_time();
@@ -322,7 +330,8 @@ static gint remaining_ms(gint64 deadline_us)
     return (gint)MIN((remaining + 999) / 1000, (gint64)G_MAXINT);
 }
 
-static GVariant *call_sync(EgpConnman *connman, const char *path,
+static GVariant *call_sync(EgpConnman *connman, const char *destination,
+                           const char *path,
                            const char *interface_name, const char *method,
                            GVariant *parameters, const GVariantType *reply_type,
                            gint64 deadline_us, GCancellable *cancellable,
@@ -336,27 +345,39 @@ static GVariant *call_sync(EgpConnman *connman, const char *path,
             g_variant_unref(g_variant_ref_sink(parameters));
         return NULL;
     }
-    return g_dbus_connection_call_sync(connman->connection, CONNMAN_BUS, path,
+    return g_dbus_connection_call_sync(connman->connection, destination, path,
                                        interface_name, method, parameters, reply_type,
                                        G_DBUS_CALL_FLAGS_NONE, timeout, cancellable, error);
 }
 
-static gboolean connman_has_owner(EgpConnman *connman, gint64 deadline_us,
-                                  GCancellable *cancellable)
+static gboolean connman_get_owner(EgpConnman *connman, gint64 deadline_us,
+                                  GCancellable *cancellable,
+                                  char owner[CONNMAN_OWNER_CAP])
 {
+    owner[0] = '\0';
     GError *error = NULL;
     GVariant *reply = g_dbus_connection_call_sync(
         connman->connection, "org.freedesktop.DBus", "/org/freedesktop/DBus",
-        "org.freedesktop.DBus", "NameHasOwner", g_variant_new("(s)", CONNMAN_BUS),
-        G_VARIANT_TYPE("(b)"), G_DBUS_CALL_FLAGS_NONE,
+        "org.freedesktop.DBus", "GetNameOwner", g_variant_new("(s)", CONNMAN_BUS),
+        G_VARIANT_TYPE("(s)"), G_DBUS_CALL_FLAGS_NONE,
         MAX(1, remaining_ms(deadline_us)), cancellable, &error);
-    gboolean owner = FALSE;
     if (reply) {
-        g_variant_get(reply, "(b)", &owner);
+        const char *unique = NULL;
+        g_variant_get(reply, "(&s)", &unique);
+        if (unique && strlen(unique) < CONNMAN_OWNER_CAP)
+            g_strlcpy(owner, unique, CONNMAN_OWNER_CAP);
         g_variant_unref(reply);
     }
     g_clear_error(&error);
-    return owner;
+    return owner[0] != '\0';
+}
+
+static gboolean connman_owner_is(EgpConnman *connman, const char *expected,
+                                 gint64 deadline_us, GCancellable *cancellable)
+{
+    char current[CONNMAN_OWNER_CAP];
+    return connman_get_owner(connman, deadline_us, cancellable, current) &&
+           !strcmp(current, expected);
 }
 
 static gboolean security_has_psk(GVariant *properties)
@@ -388,6 +409,7 @@ static gboolean properties_match_wifi(GVariant *properties, const EgpWifiConfig 
 
 typedef struct {
     gboolean found;
+    gboolean ambiguous;
     gboolean connected;
     gboolean provisioned;
     char path[EGP_DBUS_PATH_CAP];
@@ -414,12 +436,14 @@ static gboolean has_ip_address(GVariant *properties)
     return found;
 }
 
-static gboolean observe_service(EgpConnman *connman, const EgpWifiConfig *wifi,
+static gboolean observe_service(EgpConnman *connman, const char *destination,
+                                 const EgpWifiConfig *wifi,
                                 gint64 deadline_us, GCancellable *cancellable,
                                 ServiceObservation *observation, GError **error)
 {
     memset(observation, 0, sizeof(*observation));
-    GVariant *reply = call_sync(connman, CONNMAN_MANAGER_PATH, CONNMAN_MANAGER_IFACE,
+    GVariant *reply = call_sync(connman, destination, CONNMAN_MANAGER_PATH,
+                                CONNMAN_MANAGER_IFACE,
                                 "GetServices", NULL, G_VARIANT_TYPE("(a(oa{sv}))"),
                                 deadline_us, cancellable, error);
     if (!reply)
@@ -432,32 +456,41 @@ static gboolean observe_service(EgpConnman *connman, const EgpWifiConfig *wifi,
         if (properties_match_wifi(properties, wifi)) {
             const char *state = NULL;
             gboolean immutable = FALSE, favorite = FALSE, autoconnect = FALSE;
-            observation->found = TRUE;
-            g_strlcpy(observation->path, path, sizeof(observation->path));
-            if (g_variant_lookup(properties, "State", "&s", &state) && state)
-                g_strlcpy(observation->state, state, sizeof(observation->state));
+            g_variant_lookup(properties, "State", "&s", &state);
             g_variant_lookup(properties, "Immutable", "b", &immutable);
             g_variant_lookup(properties, "Favorite", "b", &favorite);
             g_variant_lookup(properties, "AutoConnect", "b", &autoconnect);
-            observation->provisioned = immutable || favorite || autoconnect;
-            observation->connected = (!strcmp(observation->state, "ready") ||
-                                      !strcmp(observation->state, "online")) &&
-                                     has_ip_address(properties);
-            g_variant_unref(properties);
-            break;
+            gboolean owned = immutable && favorite && autoconnect;
+            if (owned && observation->found) {
+                observation->ambiguous = TRUE;
+            } else if (owned) {
+                observation->found = TRUE;
+                observation->provisioned = TRUE;
+                g_strlcpy(observation->path, path, sizeof(observation->path));
+                if (state)
+                    g_strlcpy(observation->state, state,
+                              sizeof(observation->state));
+                observation->connected = (!strcmp(observation->state, "ready") ||
+                                          !strcmp(observation->state, "online")) &&
+                                         has_ip_address(properties);
+            }
         }
         g_variant_unref(properties);
     }
     g_variant_iter_free(services);
     g_variant_unref(reply);
+    if (observation->ambiguous)
+        observation->found = FALSE;
     return TRUE;
 }
 
-static gboolean find_wifi_technology(EgpConnman *connman, gint64 deadline_us,
+static gboolean find_wifi_technology(EgpConnman *connman, const char *destination,
+                                     gint64 deadline_us,
                                      GCancellable *cancellable,
                                      char path[EGP_DBUS_PATH_CAP], GError **error)
 {
-    GVariant *reply = call_sync(connman, CONNMAN_MANAGER_PATH, CONNMAN_MANAGER_IFACE,
+    GVariant *reply = call_sync(connman, destination, CONNMAN_MANAGER_PATH,
+                                CONNMAN_MANAGER_IFACE,
                                 "GetTechnologies", NULL, G_VARIANT_TYPE("(a(oa{sv}))"),
                                 deadline_us, cancellable, error);
     if (!reply)
@@ -536,17 +569,19 @@ gboolean egp_connman_apply(EgpConnman *connman, const EgpWifiConfig *wifi,
         return FALSE;
 
     gint64 deadline_us = g_get_monotonic_time() + (gint64)timeout_ms * 1000;
-    if (!connman_has_owner(connman, deadline_us, cancellable))
+    char owner[CONNMAN_OWNER_CAP];
+    if (!connman_get_owner(connman, deadline_us, cancellable, owner))
         return dependency_error(result, error);
 
     char technology_path[EGP_DBUS_PATH_CAP] = {0};
     GError *call_error = NULL;
-    if (!find_wifi_technology(connman, deadline_us, cancellable,
+    if (!find_wifi_technology(connman, owner, deadline_us, cancellable,
                               technology_path, &call_error)) {
         g_clear_error(&call_error);
         return dependency_error(result, error);
     }
-    GVariant *reply = call_sync(connman, technology_path, CONNMAN_TECH_IFACE, "Scan",
+    GVariant *reply = call_sync(connman, owner, technology_path,
+                                CONNMAN_TECH_IFACE, "Scan",
                                 NULL, G_VARIANT_TYPE("()"), deadline_us,
                                 cancellable, &call_error);
     if (reply)
@@ -560,7 +595,7 @@ gboolean egp_connman_apply(EgpConnman *connman, const EgpWifiConfig *wifi,
     ServiceObservation observed;
     gboolean observation_ok = FALSE;
     while (remaining_ms(deadline_us) > 0) {
-        if (!observe_service(connman, wifi, deadline_us, cancellable,
+        if (!observe_service(connman, owner, wifi, deadline_us, cancellable,
                              &observed, &call_error))
             break;
         if (observed.found) {
@@ -572,7 +607,7 @@ gboolean egp_connman_apply(EgpConnman *connman, const EgpWifiConfig *wifi,
     }
     if (!observation_ok) {
         g_clear_error(&call_error);
-        if (!connman_has_owner(connman, deadline_us, cancellable))
+        if (!connman_owner_is(connman, owner, deadline_us, cancellable))
             return dependency_error(result, error);
         result->code = EGP_ERROR_WIFI_AP_NOT_FOUND;
         result->state = EGP_STATE_FAILED_NOT_FOUND;
@@ -583,7 +618,8 @@ gboolean egp_connman_apply(EgpConnman *connman, const EgpWifiConfig *wifi,
     result->state = EGP_STATE_ASSOCIATING;
 
     if (!observed.connected) {
-        reply = call_sync(connman, observed.path, CONNMAN_SERVICE_IFACE, "Connect",
+        reply = call_sync(connman, owner, observed.path,
+                          CONNMAN_SERVICE_IFACE, "Connect",
                           NULL, G_VARIANT_TYPE("()"), deadline_us,
                           cancellable, &call_error);
         if (reply)
@@ -606,9 +642,10 @@ gboolean egp_connman_apply(EgpConnman *connman, const EgpWifiConfig *wifi,
                 return connman_fail(error, result->code, TRUE,
                                     "Provisioned Wi-Fi service disappeared");
             }
-            gboolean owner = connman_has_owner(connman, deadline_us, cancellable);
+            gboolean same_owner = connman_owner_is(connman, owner, deadline_us,
+                                                   cancellable);
             g_clear_error(&call_error);
-            if (!owner)
+            if (!same_owner)
                 return dependency_error(result, error);
             return connman_fail(error, EGP_ERROR_CONNMAN_APPLY_FAILED, TRUE,
                                 "ConnMan could not start association");
@@ -617,7 +654,7 @@ gboolean egp_connman_apply(EgpConnman *connman, const EgpWifiConfig *wifi,
     }
 
     while (remaining_ms(deadline_us) > 0) {
-        if (!observe_service(connman, wifi, deadline_us, cancellable,
+        if (!observe_service(connman, owner, wifi, deadline_us, cancellable,
                              &observed, &call_error))
             break;
         if (observed.found) {
@@ -635,7 +672,7 @@ gboolean egp_connman_apply(EgpConnman *connman, const EgpWifiConfig *wifi,
             break;
     }
     g_clear_error(&call_error);
-    if (!connman_has_owner(connman, deadline_us, cancellable))
+    if (!connman_owner_is(connman, owner, deadline_us, cancellable))
         return dependency_error(result, error);
     result->code = EGP_ERROR_WIFI_CONNECT_TIMEOUT;
     result->state = EGP_STATE_FAILED_TIMEOUT;
@@ -652,63 +689,38 @@ gboolean egp_connman_revoke(EgpConnman *connman, const EgpWifiConfig *wifi,
         return FALSE;
     result_init(result);
     result->state = EGP_STATE_APPLYING;
-    if (!egp_connman_remove_profile(connman, error))
-        return FALSE;
-
     gint64 deadline_us = g_get_monotonic_time() + (gint64)timeout_ms * 1000;
-    if (!connman_has_owner(connman, deadline_us, cancellable))
-        return dependency_error(result, error);
+    char owner[CONNMAN_OWNER_CAP] = {0};
+    gboolean profile_attested = owned_profile_present(connman);
     GError *call_error = NULL;
-    ServiceObservation observed;
-    if (!observe_service(connman, wifi, deadline_us, cancellable,
-                         &observed, &call_error)) {
+    ServiceObservation observed = {0};
+    if (profile_attested &&
+        (!connman_get_owner(connman, deadline_us, cancellable, owner) ||
+         !observe_service(connman, owner, wifi, deadline_us, cancellable,
+                          &observed, &call_error))) {
         g_clear_error(&call_error);
         return dependency_error(result, error);
     }
-    if (!observed.found) {
+    gboolean service_attested = profile_attested && observed.found &&
+                                !observed.ambiguous;
+    if (!egp_connman_remove_profile(connman, error))
+        return FALSE;
+
+    /* If the owned profile was already absent, or no unique service carried
+     * all three provisioning-file markers before removal, never mutate an
+     * SSID-matching service. The fixed derived file is the only safe revoke. */
+    if (!service_attested) {
         result->code = EGP_ERROR_NONE;
         result->state = EGP_STATE_UNPROVISIONED;
         result->disposition = EGP_CONNMAN_CONNECTED;
         egp_error_set(error, EGP_ERROR_NONE, FALSE, EGP_PERSISTENT_CHANGE_NONE,
-                      "Provisioned Wi-Fi service is absent");
+                      "Owned ConnMan profile removed without touching an unproven service");
         return TRUE;
     }
     g_strlcpy(result->service_path, observed.path, sizeof(result->service_path));
 
-    GVariant *reply = call_sync(connman, observed.path, CONNMAN_SERVICE_IFACE,
-                                "Disconnect", NULL, G_VARIANT_TYPE("()"),
-                                deadline_us, cancellable, &call_error);
-    if (reply)
-        g_variant_unref(reply);
-    if (!reply && !remote_error_is(call_error, ".NotConnected") &&
-        !remote_error_is(call_error, ".NotFound")) {
-        gboolean owner = connman_has_owner(connman, deadline_us, cancellable);
-        g_clear_error(&call_error);
-        if (!owner)
-            return dependency_error(result, error);
-        return connman_fail(error, EGP_ERROR_CONNMAN_APPLY_FAILED, TRUE,
-                            "ConnMan could not disconnect the provisioned service");
-    }
-    g_clear_error(&call_error);
-
-    reply = call_sync(connman, observed.path, CONNMAN_SERVICE_IFACE,
-                      "Remove", NULL, G_VARIANT_TYPE("()"),
-                      deadline_us, cancellable, &call_error);
-    if (reply)
-        g_variant_unref(reply);
-    if (!reply && !remote_error_is(call_error, ".NotFound") &&
-        !remote_error_is(call_error, ".NotSupported")) {
-        gboolean owner = connman_has_owner(connman, deadline_us, cancellable);
-        g_clear_error(&call_error);
-        if (!owner)
-            return dependency_error(result, error);
-        return connman_fail(error, EGP_ERROR_CONNMAN_APPLY_FAILED, TRUE,
-                            "ConnMan could not remove the provisioned service");
-    }
-    g_clear_error(&call_error);
-
     while (remaining_ms(deadline_us) > 0) {
-        if (!observe_service(connman, wifi, deadline_us, cancellable,
+        if (!observe_service(connman, owner, wifi, deadline_us, cancellable,
                              &observed, &call_error))
             break;
         if (!observed.found || !observed.provisioned) {
@@ -723,7 +735,7 @@ gboolean egp_connman_revoke(EgpConnman *connman, const EgpWifiConfig *wifi,
             break;
     }
     g_clear_error(&call_error);
-    if (!connman_has_owner(connman, deadline_us, cancellable))
+    if (!connman_owner_is(connman, owner, deadline_us, cancellable))
         return dependency_error(result, error);
     return connman_fail(error, EGP_ERROR_CONNMAN_APPLY_FAILED, TRUE,
                         "ConnMan revocation outcome is uncertain after timeout");

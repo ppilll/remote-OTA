@@ -72,11 +72,11 @@ On `FORGET_WIFI`:
 
 1. complete the canonical tombstone step;
 2. atomically remove the derived `.config` and sync its directory;
-3. request disconnection/removal through ConnMan D-Bus if applicable;
+3. do not call `Service.Remove` or `Service.Disconnect`: ConnMan 1.40 exposes no property proving that a merged SSID/security service or learned credential is exclusively provisioning-owned, so those calls could mutate unrelated state;
 4. observe that the provisioned service no longer has the provisioning-owned immutable/autoconnect properties;
 5. report success without affecting unrelated ConnMan services.
 
-The target evidence's true-to-false transition is the acceptance model. Do not delete all of `/var/lib/connman`.
+The target evidence's true-to-false transition after removing the fixed derived file is the acceptance model. A pre-removal service is considered attributable to that file only when `Immutable`, `Favorite`, and `AutoConnect` are all true under the same ConnMan unique bus owner; an SSID/security match or any one marker is insufficient. Observation may retain the exact object path for correlation, but R5 does not use it to delete or disconnect a service. Do not delete all of `/var/lib/connman`.
 
 ## Availability recovery
 

@@ -16,7 +16,8 @@ class MergedSourceContract(unittest.TestCase):
         main = (AGENT / "src/main.c").read_text(encoding="utf-8")
         makefile = (PACKAGE / "edgeguard-remote-ota.mk").read_text(encoding="utf-8")
         self.assertIn("gboolean ota_agent_services_init(", services)
-        self.assertIn("$(@D)/src/main.c $(@D)/src/services.c", makefile)
+        self.assertEqual(makefile.count("$(@D)/src/main.c"), 1)
+        self.assertEqual(makefile.count("$(@D)/src/services.c"), 1)
         self.assertRegex(main, r"#ifdef OTA_TEST_WEAK_SERVICES\s+__attribute__\(\(weak\)\)")
 
     def test_single_artifact_validator_and_conservative_contract(self):

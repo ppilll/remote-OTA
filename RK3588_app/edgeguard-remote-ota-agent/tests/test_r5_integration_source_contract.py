@@ -28,7 +28,10 @@ class R5IntegrationSourceContract(unittest.TestCase):
         self.assertIn("ota_control_idle_wait", MAIN)
         self.assertIn("ota_runtime_endpoint_refresh", MAIN)
         self.assertRegex(MAIN, re.compile(
-            r"ota_control_idle_wait\(.*?ota_runtime_endpoint_refresh\(.*?OTA_STATE_CHECK_NETWORK",
+            r"ota_control_idle_wait\(.*?refresh_cycle_config\(.*?OTA_STATE_CHECK_NETWORK",
+            re.DOTALL))
+        self.assertRegex(MAIN, re.compile(
+            r"static gboolean refresh_cycle_config\(.*?ota_runtime_endpoint_refresh\(",
             re.DOTALL))
         self.assertIn("services->phase(services->user, &cycle_config", MAIN)
 

@@ -7,8 +7,15 @@
 
 typedef struct {
     EgpOperations *operations;
+    gboolean reconcile;
     EgpProtocolRequest request;
     char result[EGP_PROTOCOL_MAX_JSON + 1u];
+    guint64 endpoint_generation;
+    char endpoint[EGP_ENDPOINT_MAX_BYTES + 1u];
+    EgpErrorCode reconcile_code;
+    EgpReconcileCompleted reconcile_completed;
+    gpointer reconcile_data;
+    GCancellable *cancellable;
 } Work;
 
 struct _EgpOperations {
@@ -21,6 +28,7 @@ struct _EgpOperations {
     EgpAuthorizeCommit authorize_commit;
     EgpResultPublished result_published;
     gpointer user_data;
+    GCancellable *active_cancellable;
 };
 
 typedef struct {
@@ -172,8 +180,10 @@ static const char *change_name(EgpPersistentChange change)
 }
 
 static void serialize_result(const EgpProtocolRequest *request,
-                             const char *status, const EgpError *error,
-                             char output[EGP_PROTOCOL_MAX_JSON + 1u])
+                              const char *status, const EgpError *error,
+                              guint64 endpoint_generation,
+                              const char *endpoint,
+                              char output[EGP_PROTOCOL_MAX_JSON + 1u])
 {
     char transaction_id[37];
     egp_transaction_id_format(request->transaction_id, transaction_id);
@@ -193,6 +203,11 @@ static void serialize_result(const EgpProtocolRequest *request,
     json_builder_add_boolean_value(builder, error->retryable);
     ADD_STRING("persistent_change", change_name(error->persistent_change));
     ADD_STRING("message", error->message);
+    if (request->opcode == EGP_OPCODE_SET_ENDPOINT && endpoint_generation && endpoint) {
+        json_builder_set_member_name(builder, "generation");
+        json_builder_add_int_value(builder, (gint64)endpoint_generation);
+        ADD_STRING("base_url", endpoint);
+    }
     json_builder_end_object(builder);
 #undef ADD_STRING
     JsonNode *root = json_builder_get_root(builder);
@@ -232,11 +247,13 @@ static gboolean stable_idle(EgpOperations *operations, EgpError *error)
 static gboolean authorize_and_idle(Work *work, EgpError *error)
 {
     EgpOperations *operations = work->operations;
-    if (!operations->authorize_commit ||
-        !operations->authorize_commit(operations->user_data,
-                                      work->request.peer_path, error))
+    if (!stable_idle(operations, error))
         return FALSE;
-    return stable_idle(operations, error);
+    return operations->authorize_commit &&
+           operations->authorize_commit(operations->user_data,
+                                        work->request.peer_path,
+                                        work->request.window_epoch,
+                                        work->request.connection_epoch, error);
 }
 
 static void set_success(EgpError *error, EgpPersistentChange change,
@@ -264,7 +281,7 @@ static void apply_wifi(Work *work, EgpError *result)
     EgpError apply_error = {0};
     EgpConnmanResult connman_result = {0};
     gboolean applied = egp_connman_apply(operations->connman, &candidate,
-                                         CONNMAN_TIMEOUT_MS, NULL,
+                                         CONNMAN_TIMEOUT_MS, work->cancellable,
                                          &connman_result, &apply_error);
     egp_status_set_provisioning(operations->status, connman_result.state,
                                 applied && connman_result.state == EGP_STATE_CONNECTED);
@@ -295,7 +312,7 @@ static void apply_wifi(Work *work, EgpError *result)
             EgpConnmanResult ignored = {0};
             EgpError ignored_error = {0};
             reconciled = egp_connman_apply(operations->connman, &previous,
-                                           CONNMAN_TIMEOUT_MS, NULL,
+                                           CONNMAN_TIMEOUT_MS, work->cancellable,
                                            &ignored, &ignored_error);
             egp_status_set_provisioning(operations->status, ignored.state,
                                         reconciled && ignored.state == EGP_STATE_CONNECTED);
@@ -327,6 +344,9 @@ static void set_endpoint(Work *work, EgpError *result)
     if (!egp_store_replace_runtime(work->operations->store, endpoint, &previous,
                                    &previous_present, &committed, result))
         goto done;
+    work->endpoint_generation = committed.generation;
+    g_strlcpy(work->endpoint, committed.ota_server_base_url,
+              sizeof(work->endpoint));
     char observation[32];
     if (!egp_status_agent_idle(work->operations->status, observation, result))
         egp_error_set(result, EGP_ERROR_PROVISIONING_RACE, TRUE,
@@ -359,7 +379,7 @@ static void forget_wifi(Work *work, EgpError *result)
     gboolean revoked;
     if (had_wifi) {
         revoked = egp_connman_revoke(operations->connman, &forgotten,
-                                     CONNMAN_TIMEOUT_MS, NULL,
+                                     CONNMAN_TIMEOUT_MS, work->cancellable,
                                      &connman_result, result);
     } else {
         revoked = egp_connman_remove_profile(operations->connman, result);
@@ -394,6 +414,68 @@ static void check_update(Work *work, EgpError *result)
                     "OTA check request accepted by the Agent");
 }
 
+static void reconcile_canonical(Work *work, EgpError *result)
+{
+    EgpOperations *operations = work->operations;
+    EgpWifiConfig wifi = {0};
+    gboolean pending = FALSE;
+    if (!egp_store_forget_pending(operations->store, &wifi, &pending, result))
+        goto done;
+    if (pending) {
+        if (!stable_idle(operations, result))
+            goto done;
+        EgpConnmanResult connman_result = {0};
+        if (!egp_connman_revoke(operations->connman, &wifi,
+                                CONNMAN_TIMEOUT_MS, work->cancellable,
+                                &connman_result, result)) {
+            egp_status_set_provisioning(operations->status,
+                                        connman_result.state, FALSE);
+            goto done;
+        }
+        if (!egp_store_forget_finish(operations->store, result))
+            goto done;
+        egp_status_set_provisioning(operations->status,
+                                    EGP_STATE_UNPROVISIONED, FALSE);
+        set_success(result, EGP_PERSISTENT_CHANGE_COMMITTED,
+                    "Pending Wi-Fi forget reconciled");
+        goto done;
+    }
+
+    egp_wifi_clear(&wifi);
+    gboolean present = FALSE;
+    if (!egp_store_load_wifi(operations->store, &wifi, &present, result)) {
+        egp_status_set_provisioning(operations->status,
+                                    EGP_STATE_FAILED_CONFIG, FALSE);
+        goto done;
+    }
+    if (!present) {
+        if (!egp_connman_remove_profile(operations->connman, result)) {
+            egp_status_set_provisioning(operations->status,
+                                        EGP_STATE_FAILED_DEPENDENCY, FALSE);
+            goto done;
+        }
+        egp_status_set_provisioning(operations->status,
+                                    EGP_STATE_UNPROVISIONED, FALSE);
+        set_success(result, EGP_PERSISTENT_CHANGE_NONE,
+                    "Absent canonical Wi-Fi reconciled");
+        goto done;
+    }
+    if (!stable_idle(operations, result))
+        goto done;
+    EgpConnmanResult connman_result = {0};
+    gboolean applied = egp_connman_apply(operations->connman, &wifi,
+                                         CONNMAN_TIMEOUT_MS,
+                                         work->cancellable,
+                                         &connman_result, result);
+    egp_status_set_provisioning(operations->status, connman_result.state,
+                                applied && connman_result.state == EGP_STATE_CONNECTED);
+    if (applied)
+        set_success(result, EGP_PERSISTENT_CHANGE_NONE,
+                    "Canonical Wi-Fi reconciled");
+done:
+    egp_wifi_clear(&wifi);
+}
+
 static void worker(GTask *task, gpointer source_object, gpointer task_data,
                    GCancellable *cancellable)
 {
@@ -401,6 +483,12 @@ static void worker(GTask *task, gpointer source_object, gpointer task_data,
     (void)cancellable;
     Work *work = task_data;
     EgpError result = {0};
+    if (work->reconcile) {
+        reconcile_canonical(work, &result);
+        work->reconcile_code = result.code;
+        g_task_return_boolean(task, TRUE);
+        return;
+    }
     switch (work->request.opcode) {
     case EGP_OPCODE_SET_WIFI:
         apply_wifi(work, &result);
@@ -421,7 +509,8 @@ static void worker(GTask *task, gpointer source_object, gpointer task_data,
     }
     serialize_result(&work->request,
                      result.code == EGP_ERROR_NONE ? "SUCCEEDED" : "FAILED",
-                     &result, work->result);
+                     &result, work->endpoint_generation, work->endpoint,
+                     work->result);
     g_task_return_boolean(task, TRUE);
 }
 
@@ -432,6 +521,8 @@ static void work_free(gpointer data)
         return;
     memset(&work->request, 0, sizeof(work->request));
     memset(work->result, 0, sizeof(work->result));
+    memset(work->endpoint, 0, sizeof(work->endpoint));
+    g_clear_object(&work->cancellable);
     g_free(work);
 }
 
@@ -443,12 +534,18 @@ static void completed(GObject *source_object, GAsyncResult *result,
     GTask *task = G_TASK(result);
     Work *work = g_task_get_task_data(task);
     g_task_propagate_boolean(task, NULL);
-    if (operations->result_published)
-        operations->result_published(operations->user_data,
-                                     work->request.peer_path, work->result);
     g_mutex_lock(&operations->lock);
     operations->busy = FALSE;
+    g_clear_object(&operations->active_cancellable);
     g_mutex_unlock(&operations->lock);
+    if (work->reconcile) {
+        if (work->reconcile_completed)
+            work->reconcile_completed(work->reconcile_data,
+                                      work->reconcile_code);
+    } else if (operations->result_published) {
+        operations->result_published(operations->user_data,
+                                     work->request.peer_path, work->result);
+    }
 }
 
 EgpOperations *egp_operations_new(EgpStore *store, EgpConnman *connman,
@@ -476,29 +573,32 @@ gboolean egp_operations_submit(EgpOperations *operations,
 {
     if (!operations || !request)
         return FALSE;
+    Work *work = g_new0(Work, 1);
+    work->operations = operations;
+    work->request = *request;
+    work->cancellable = g_cancellable_new();
     g_mutex_lock(&operations->lock);
     if (operations->busy || operations->closing) {
         g_mutex_unlock(&operations->lock);
         egp_error_set(error, EGP_ERROR_PROVISIONING_BUSY, TRUE,
                       EGP_PERSISTENT_CHANGE_NONE,
                       "Another provisioning operation is in progress");
+        work_free(work);
         return FALSE;
     }
     operations->busy = TRUE;
+    operations->active_cancellable = g_object_ref(work->cancellable);
     g_mutex_unlock(&operations->lock);
 
-    Work *work = g_new0(Work, 1);
-    work->operations = operations;
-    work->request = *request;
     EgpError accepted = {0};
     egp_error_set(&accepted, EGP_ERROR_NONE, FALSE,
                   EGP_PERSISTENT_CHANGE_NONE, "Operation accepted");
     char accepted_json[EGP_PROTOCOL_MAX_JSON + 1u] = {0};
-    serialize_result(request, "ACCEPTED", &accepted, accepted_json);
+    serialize_result(request, "ACCEPTED", &accepted, 0, NULL, accepted_json);
     operations->result_published(operations->user_data, request->peer_path,
                                  accepted_json);
 
-    GTask *task = g_task_new(NULL, NULL, completed, operations);
+    GTask *task = g_task_new(NULL, work->cancellable, completed, operations);
     g_task_set_task_data(task, work, work_free);
     g_task_run_in_thread(task, worker);
     g_object_unref(task);
@@ -516,6 +616,51 @@ gboolean egp_operations_busy(EgpOperations *operations)
     return busy;
 }
 
+gboolean egp_operations_reconcile(EgpOperations *operations,
+                                  EgpReconcileCompleted reconcile_completed,
+                                  gpointer completed_data,
+                                  EgpError *error)
+{
+    if (!operations || !reconcile_completed)
+        return FALSE;
+    Work *work = g_new0(Work, 1);
+    work->operations = operations;
+    work->reconcile = TRUE;
+    work->reconcile_completed = reconcile_completed;
+    work->reconcile_data = completed_data;
+    work->cancellable = g_cancellable_new();
+
+    g_mutex_lock(&operations->lock);
+    if (operations->busy || operations->closing) {
+        g_mutex_unlock(&operations->lock);
+        work_free(work);
+        egp_error_set(error, EGP_ERROR_PROVISIONING_BUSY, TRUE,
+                      EGP_PERSISTENT_CHANGE_NONE,
+                      "Another provisioning operation is in progress");
+        return FALSE;
+    }
+    operations->busy = TRUE;
+    operations->active_cancellable = g_object_ref(work->cancellable);
+    g_mutex_unlock(&operations->lock);
+
+    GTask *task = g_task_new(NULL, work->cancellable, completed, operations);
+    g_task_set_task_data(task, work, work_free);
+    g_task_run_in_thread(task, worker);
+    g_object_unref(task);
+    egp_error_clear(error);
+    return TRUE;
+}
+
+void egp_operations_connman_lost(EgpOperations *operations)
+{
+    if (!operations)
+        return;
+    g_mutex_lock(&operations->lock);
+    if (operations->active_cancellable)
+        g_cancellable_cancel(operations->active_cancellable);
+    g_mutex_unlock(&operations->lock);
+}
+
 void egp_operations_free(EgpOperations *operations)
 {
     if (!operations)
@@ -525,6 +670,7 @@ void egp_operations_free(EgpOperations *operations)
     g_mutex_unlock(&operations->lock);
     while (egp_operations_busy(operations))
         g_main_context_iteration(NULL, TRUE);
+    g_clear_object(&operations->active_cancellable);
     g_mutex_clear(&operations->lock);
     memset(operations, 0, sizeof(*operations));
     g_free(operations);

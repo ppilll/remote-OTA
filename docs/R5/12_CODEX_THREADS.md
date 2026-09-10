@@ -4,7 +4,7 @@
 
 Use exactly three sequential threads: Thread 1, Thread 2, Thread 3. Every path below is relative to the repository root into which this package is copied. Each thread has its own explicit list of real repository paths; no aggregate baseline alias is used.
 
-The examined repository contains no `docs/R4/` directory. Current OTA Agent, `edgeguard-rk-ab`, and Buildroot package files listed below are the actual R4 implementation baseline. Do not replace them with invented R4 document names.
+The current repository contains the frozen R4 package at `docs/R4/01_FINAL_BASELINE.md` through `docs/R4/06_EVIDENCE_REFERENCES.md`. Those real files, the current OTA Agent, `edgeguard-rk-ab`, and Buildroot package files form the R4 baseline. R5 implementation work may update references to them but must not edit the frozen R4 evidence.
 
 ## Thread 1 — persistence, ConnMan, endpoint
 

@@ -38,4 +38,4 @@ Use an unmistakable synthetic secret fixture and scan stdout/stderr, captured lo
 
 ## Revoke boundaries
 
-`FORGET_WIFI` clears canonical and derived credential copies and requests ConnMan disconnect/revocation. It does not delete endpoint override, Agent state, release identity, RAUC data, or A/B metadata. BLE bonds are not silently deleted by `FORGET_WIFI`; bond revocation is a separate local security action. Factory reset is not exposed in R5 v1.
+`FORGET_WIFI` clears canonical and derived credential copies and observes ConnMan's provisioning-property revocation. It does not call ConnMan `Service.Remove`/`Service.Disconnect` because ConnMan 1.40 does not expose exclusive provenance for a merged service, and it does not delete endpoint override, Agent state, release identity, RAUC data, or A/B metadata. BLE bonds are not silently deleted by `FORGET_WIFI`; bond revocation is a separate local security action. Factory reset is not exposed in R5 v1.

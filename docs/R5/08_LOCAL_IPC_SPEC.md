@@ -40,7 +40,7 @@ Response examples:
 {"version":1,"request_id":"b0cb1b28-94cb-4c03-8e4c-f52fc1294199","status":"REJECTED","error":"AGENT_BUSY"}
 ```
 
-`request_id` is a canonical UUID and provides idempotence during a bounded in-memory cache. No request carries a URL, bundle, slot, shell string, credential, or arbitrary argument.
+`request_id` is canonical UUID text and provides idempotence during a bounded in-memory cache. It is the injective textual formatting of the opaque 128-bit GATT transaction ID; v1 does not require UUIDv4 version bits because forcing those bits would create deterministic collisions. No request carries a URL, bundle, slot, shell string, credential, or arbitrary argument.
 
 ## Command semantics
 
