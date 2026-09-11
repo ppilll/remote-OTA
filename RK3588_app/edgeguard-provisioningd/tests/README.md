@@ -16,6 +16,13 @@ execute them.
   reconciliation and revoke ownership, read-only GATT surfaces, BlueZ
   owner/epoch gates, scoped IPC request IDs, endpoint bounds/result schema,
   and the real R4 documentation references.
+- `test_gatt_read.c` covers separate read/write option parsing, retained write
+  rejection for non-zero offset and prepare-write, read offset boundaries,
+  immutable continuation bytes, context/timeout invalidation, and the 512-byte
+  snapshot hard bound.
+- `test_read_value_bounds.c` calls the production serializers with worst-case
+  values for DeviceInfo, RuntimeStatus, and OperationResult and covers the
+  endpoint maximum and maximum-plus-one boundary.
 
 Later host verification should link the C tests with GLib/GIO/JSON-GLib and the
 Thread 1 model/error implementation, then separately exercise GDBus against a

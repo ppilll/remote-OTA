@@ -9,7 +9,7 @@ typedef struct {
     EgpOperations *operations;
     gboolean reconcile;
     EgpProtocolRequest request;
-    char result[EGP_PROTOCOL_MAX_JSON + 1u];
+    char result[EGP_OPERATION_RESULT_MAX_JSON + 1u];
     guint64 endpoint_generation;
     char endpoint[EGP_ENDPOINT_MAX_BYTES + 1u];
     EgpErrorCode reconcile_code;
@@ -180,11 +180,11 @@ static const char *change_name(EgpPersistentChange change)
     }
 }
 
-static void serialize_result(const EgpProtocolRequest *request,
-                              const char *status, const EgpError *error,
-                              guint64 endpoint_generation,
-                              const char *endpoint,
-                              char output[EGP_PROTOCOL_MAX_JSON + 1u])
+static char *build_result_json(const EgpProtocolRequest *request,
+                               const char *status, const EgpError *error,
+                               guint64 endpoint_generation,
+                               const char *endpoint, const char *message,
+                               gsize *length)
 {
     char transaction_id[37];
     egp_transaction_id_format(request->transaction_id, transaction_id);
@@ -203,7 +203,7 @@ static void serialize_result(const EgpProtocolRequest *request,
     json_builder_set_member_name(builder, "retryable");
     json_builder_add_boolean_value(builder, error->retryable);
     ADD_STRING("persistent_change", change_name(error->persistent_change));
-    ADD_STRING("message", error->message);
+    ADD_STRING("message", message);
     if (request->opcode == EGP_OPCODE_SET_ENDPOINT && endpoint_generation && endpoint) {
         json_builder_set_member_name(builder, "generation");
         json_builder_add_int_value(builder, (gint64)endpoint_generation);
@@ -214,18 +214,50 @@ static void serialize_result(const EgpProtocolRequest *request,
     JsonNode *root = json_builder_get_root(builder);
     JsonGenerator *generator = json_generator_new();
     json_generator_set_root(generator, root);
-    gsize length = 0;
-    char *json = json_generator_to_data(generator, &length);
-    if (json && length <= EGP_PROTOCOL_MAX_JSON)
-        g_strlcpy(output, json, EGP_PROTOCOL_MAX_JSON + 1u);
-    else
-        g_strlcpy(output,
-                  "{\"schema_version\":1,\"operation\":\"UNKNOWN\",\"status\":\"FAILED\",\"error_code\":\"INTERNAL_ERROR\",\"retryable\":true,\"persistent_change\":\"NONE\",\"message\":\"Result serialization failed\"}",
-                  EGP_PROTOCOL_MAX_JSON + 1u);
-    g_free(json);
+    char *json = json_generator_to_data(generator, length);
     json_node_free(root);
     g_object_unref(generator);
     g_object_unref(builder);
+    return json;
+}
+
+gsize egp_operations_result_json(
+    const EgpProtocolRequest *request, const char *status,
+    const EgpError *operation_error, guint64 endpoint_generation,
+    const char *endpoint,
+    char output[EGP_OPERATION_RESULT_MAX_JSON + 1u])
+{
+    gboolean includes_endpoint = request &&
+        request->opcode == EGP_OPCODE_SET_ENDPOINT && endpoint_generation && endpoint;
+    if (!request || !status || strnlen(status, 32) >= 32 ||
+        !operation_error || !output ||
+        !memchr(operation_error->message, '\0', sizeof(operation_error->message)) ||
+        !egp_opcode_name(request->opcode) ||
+        !egp_error_code_name(operation_error->code) ||
+        (includes_endpoint &&
+         (endpoint_generation > (guint64)EGP_JSON_UINT_MAX ||
+          strnlen(endpoint, EGP_ENDPOINT_MAX_BYTES + 1u) >
+              EGP_ENDPOINT_MAX_BYTES)))
+        return 0;
+    output[0] = '\0';
+    gsize length = 0;
+    char *json = build_result_json(request, status, operation_error,
+                                   endpoint_generation, endpoint,
+                                   operation_error->message, &length);
+    if (!json || length > EGP_OPERATION_RESULT_MAX_JSON) {
+        g_free(json);
+        json = build_result_json(request, status, operation_error,
+                                 endpoint_generation, endpoint,
+                                 "Result detail omitted", &length);
+    }
+    if (!json || length > EGP_OPERATION_RESULT_MAX_JSON) {
+        g_free(json);
+        return 0;
+    }
+    memcpy(output, json, length);
+    output[length] = '\0';
+    g_free(json);
+    return length;
 }
 
 static gboolean stable_idle(EgpOperations *operations, EgpError *error)
@@ -505,10 +537,10 @@ static void worker(GTask *task, gpointer source_object, gpointer task_data,
                       EGP_PERSISTENT_CHANGE_NONE, "Opcode is unsupported");
         break;
     }
-    serialize_result(&work->request,
-                     result.code == EGP_ERROR_NONE ? "SUCCEEDED" : "FAILED",
-                     &result, work->endpoint_generation, work->endpoint,
-                     work->result);
+    egp_operations_result_json(
+        &work->request,
+        result.code == EGP_ERROR_NONE ? "SUCCEEDED" : "FAILED",
+        &result, work->endpoint_generation, work->endpoint, work->result);
     g_task_return_boolean(task, TRUE);
 }
 
@@ -592,8 +624,19 @@ gboolean egp_operations_submit(EgpOperations *operations,
     EgpError accepted = {0};
     egp_error_set(&accepted, EGP_ERROR_NONE, FALSE,
                   EGP_PERSISTENT_CHANGE_NONE, "Operation accepted");
-    char accepted_json[EGP_PROTOCOL_MAX_JSON + 1u] = {0};
-    serialize_result(request, "ACCEPTED", &accepted, 0, NULL, accepted_json);
+    char accepted_json[EGP_OPERATION_RESULT_MAX_JSON + 1u] = {0};
+    if (!egp_operations_result_json(request, "ACCEPTED", &accepted, 0, NULL,
+                                    accepted_json)) {
+        g_mutex_lock(&operations->lock);
+        operations->busy = FALSE;
+        g_clear_object(&operations->active_cancellable);
+        g_mutex_unlock(&operations->lock);
+        egp_error_set(error, EGP_ERROR_INTERNAL_ERROR, TRUE,
+                      EGP_PERSISTENT_CHANGE_NONE,
+                      "Operation result serialization failed");
+        work_free(work);
+        return FALSE;
+    }
     operations->result_published(operations->user_data, request->peer_path,
                                  accepted_json);
 

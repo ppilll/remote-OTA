@@ -18,6 +18,7 @@ define EDGEGUARD_PROVISIONING_BUILD_CMDS
 		$(@D)/src/main.c $(@D)/src/store.c $(@D)/src/endpoint.c \
 		$(@D)/src/connman.c $(@D)/src/protocol.c $(@D)/src/security.c \
 		$(@D)/src/status.c $(@D)/src/operations.c $(@D)/src/input.c \
+		$(@D)/src/gatt_read.c \
 		$(@D)/src/bluez.c \
 		-o $(@D)/edgeguard-provisioningd $(TARGET_LDFLAGS) \
 		`$(EDGEGUARD_PROVISIONING_PKG_CONFIG) --libs glib-2.0 gio-2.0 gio-unix-2.0 json-glib-1.0`

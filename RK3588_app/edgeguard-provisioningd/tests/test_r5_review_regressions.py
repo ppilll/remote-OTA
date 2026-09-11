@@ -124,15 +124,54 @@ def test_endpoint_bound_and_result_schema_are_consistent():
     config = source(AGENT, "include/edgeguard_ota/config.h")
     runtime = source(AGENT, "src/runtime_endpoint.c")
     endpoint_doc = source(REPO, "docs/R5/07_ENDPOINT_CONFIG_SPEC.md")
-    assert "EGP_ENDPOINT_MAX_BYTES 512u" in model
-    assert "OTA_ENDPOINT_MAX_BYTES 512u" in config
+    assert "EGP_ENDPOINT_MAX_BYTES 64u" in model
+    assert "EGP_GATT_VALUE_MAX_BYTES 512u" in model
+    assert "OTA_ENDPOINT_MAX_BYTES 64u" in config
     assert "G_STATIC_ASSERT(OTA_ENDPOINT_MAX_BYTES == EGP_ENDPOINT_MAX_BYTES)" in runtime
     assert "strlen(effective_endpoint) <= EGP_ENDPOINT_MAX_BYTES" in status
-    assert 'ADD_STRING(builder, "effective_endpoint_source", status->endpoint_source)' in status
+    assert 'ADD_STRING(builder, "effective_endpoint_source",' in status
+    assert 'value->effective_endpoint_source)' in status
     assert 'ADD_STRING(builder, "runtime_config_error", "ENDPOINT_CONFIG_INVALID")' in status
     assert 'ADD_STRING("base_url", endpoint)' in operations
     assert 'json_builder_set_member_name(builder, "generation")' in operations
-    assert "maximum serialized base URL length is 512 bytes" in endpoint_doc
+    assert "maximum serialized base URL length is 64 bytes" in endpoint_doc
+
+
+def test_read_offsets_snapshot_and_att_bound_are_wired():
+    bluez = source(PROVISIONING, "src/bluez.c")
+    gatt = source(PROVISIONING, "src/gatt_read.c")
+    main = source(PROVISIONING, "src/main.c")
+    build = source(REPO, "buildroot-external/package/edgeguard-provisioning/edgeguard-provisioning.mk")
+    assert "egp_gatt_parse_read_options" in bluez
+    assert "egp_gatt_parse_write_options" in bluez
+    assert 'name = "org.bluez.Error.InvalidOffset"' in bluez
+    assert "egp_gatt_read_snapshot_begin" in bluez
+    assert "egp_gatt_read_snapshot_slice" in bluez
+    assert "EGP_GATT_VALUE_MAX_BYTES" in gatt
+    assert "bluez_owner" in gatt and "security_epoch" in gatt
+    assert "EGP_GATT_READ_SNAPSHOT_TTL_US" in gatt
+    assert "egp_bluez_invalidate_read" in main
+    set_window = bluez[bluez.index("void egp_bluez_set_window"):
+                       bluez.index("void egp_bluez_invalidate_read")]
+    assert "clear_read_snapshot" in set_window
+    epoch_change = bluez[bluez.index("static void bump_peer_epoch"):
+                         bluez.index("static gboolean retry_registration")]
+    assert "clear_read_snapshot" in epoch_change
+    assert "EGP_BLUEZ_OPERATION_RESULT" in main
+    assert "src/gatt_read.c" in build
+
+
+def test_required_new_behavior_tests_are_present():
+    gatt_test = source(PROVISIONING, "tests/test_gatt_read.c")
+    bound_test = source(PROVISIONING, "tests/test_read_value_bounds.c")
+    for token in ("offset-boundaries", "context-lifetime", "hard-bound",
+                  "egp_gatt_parse_write_options"):
+        assert token in gatt_test
+    for token in ("endpoint/max-bound", "EGP_ENDPOINT_MAX_BYTES + 1u",
+                  "egp_status_serialize_device_info",
+                  "egp_status_serialize_runtime",
+                  "egp_operations_result_json"):
+        assert token in bound_test
 
 
 def test_r5_references_real_frozen_r4_package():

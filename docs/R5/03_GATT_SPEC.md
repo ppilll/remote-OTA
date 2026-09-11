@@ -17,13 +17,17 @@ The application exports `org.freedesktop.DBus.ObjectManager`, one `org.bluez.Gat
 
 ## Read payloads
 
-Read values are canonical UTF-8 JSON, maximum 1024 bytes, no NUL, no secret fields, and `schema_version: 1`.
+Read values are canonical UTF-8 JSON, maximum 512 bytes, no NUL, no secret fields, and `schema_version: 1`.
+
+`ReadValue` accepts BlueZ's valid unsigned ATT `offset`. An offset of zero creates one immutable, bounded, short-lived value snapshot. Continuation reads for the same BlueZ owner, peer, characteristic, and connection/security epoch use that snapshot instead of serializing again. `offset == value length` returns an empty value; `offset > value length` returns `org.bluez.Error.InvalidOffset`. The snapshot is discarded when the read completes or expires, and on peer disconnect, a relevant security-property epoch change, provisioning-window/owner change, OperationResult replacement, or BlueZ owner change.
 
 DeviceInfo fields:
 
 ```json
 {"schema_version":1,"protocol_version":1,"device_id":"...","release":"1.2.5","build_id":"rk3588-r4-1.2.5-001","provisioning_state":"UNPROVISIONED"}
 ```
+
+DeviceInfo `release` and `build_id` status projections are each limited to 64 printable ASCII bytes; an external release source outside that read-surface bound is reported unavailable rather than emitted as an oversized value.
 
 RuntimeStatus fields are a bounded subset of:
 
@@ -63,7 +67,7 @@ Exact duplicate fragments are idempotent. Overlap containing different bytes, ga
 ProvisioningRequest:
 
 - `0x01 SET_WIFI`: `{"ssid":"...","security":"psk","passphrase":"...","hidden":false}`
-- `0x02 SET_ENDPOINT`: `{"base_url":"http://host:port"}` (base URL maximum 512 bytes)
+- `0x02 SET_ENDPOINT`: `{"base_url":"http://host:port"}` (base URL maximum 64 bytes)
 - `0x03 FORGET_WIFI`: `{}`
 
 ControlRequest:
@@ -82,4 +86,4 @@ Writes return only acceptance of the ATT write. Final application results are de
 
 ## BlueZ method behavior
 
-Reject unsupported offsets/options, prepare-write patterns not implemented by this protocol, invalid devices, and unauthorized calls using stable D-Bus errors mapped to `10_ERROR_MODEL.md`. Inspect the `device`, `offset`, `mtu`, and `prepare-authorize` options supplied by BlueZ. Never trust an address or peer ID supplied inside JSON.
+Read and write options are parsed separately. `ReadValue` supports the offset behavior above. `WriteValue` continues to reject non-zero ATT offsets and `prepare-authorize:true`; EGP1 remains the only write-fragmentation protocol. Reject invalid devices and unauthorized calls using stable D-Bus errors mapped to `10_ERROR_MODEL.md`. Inspect the `device`, `offset`, `mtu`, and `prepare-authorize` options supplied by BlueZ. Never trust an address or peer ID supplied inside JSON.

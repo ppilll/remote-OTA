@@ -16,6 +16,7 @@ Use a known fixture passphrase such as `R5-Secret-Fixture-Do-Not-Log` only in is
 - same-directory atomic replacement, short-write/fsync/rename failures, restart recovery, tombstone completion;
 - corrupt/unknown schema behavior and explicit migration fixture;
 - valid HTTP/HTTPS syntax; missing host; bad port; userinfo; path/query/fragment; control characters; unsupported schemes; oversized URL;
+- endpoint base URLs at the 64-byte maximum are accepted and 65-byte candidates are rejected consistently by provisioning and Agent validation;
 - invalid endpoint preserves the old effective value; corrupt override falls back to immutable default.
 
 ### ConnMan adapter
@@ -32,6 +33,9 @@ Use a known fixture passphrase such as `R5-Secret-Fixture-Do-Not-Log` only in is
 
 - ObjectManager hierarchy and UUID/property registry;
 - valid single/multi-fragment writes at several MTUs;
+- ReadValue offset zero, interior, exact-length, and past-end boundaries; continuation bytes come from one immutable snapshot and stale snapshots are invalidated by timeout, disconnect, BlueZ owner, peer security epoch, window/owner, and OperationResult changes;
+- WriteValue still rejects non-zero ATT offset and prepare-write options while retaining EGP1 framing;
+- real serializer worst-case DeviceInfo, RuntimeStatus, and OperationResult values are each at most 512 bytes;
 - gap, overlap conflict, exact duplicate, inconsistent header, all-zero ID, oversized total, invalid UTF-8, timeout, disconnect, global/per-peer limits;
 - completed transaction replay and conflicting duplicate ID;
 - unpaired, encrypted-but-unbonded, bonded but window-closed, authorized/window-open, revoked bond, and wrong peer result access;

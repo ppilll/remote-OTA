@@ -19,6 +19,8 @@
 
 #define EXTERNAL_SOURCE_TIMEOUT_MS 2000
 
+G_STATIC_ASSERT(EGP_STATUS_MAX_JSON == EGP_GATT_VALUE_MAX_BYTES);
+
 struct _EgpStatus {
     GMutex lock;
     EgpStore *store;
@@ -27,8 +29,8 @@ struct _EgpStatus {
     gboolean device_available;
     char device_id[37];
     gboolean release_available;
-    char release[EGP_MESSAGE_CAP];
-    char build_id[EGP_MESSAGE_CAP];
+    char release[EGP_RELEASE_FIELD_MAX_BYTES + 1u];
+    char build_id[EGP_RELEASE_FIELD_MAX_BYTES + 1u];
     gboolean runtime_available;
     char endpoint[EGP_ENDPOINT_MAX_BYTES + 1u];
     char endpoint_source[32];
@@ -170,6 +172,37 @@ static gboolean frozen_agent_state(const char *state)
     return FALSE;
 }
 
+static gboolean frozen_agent_error(const char *code)
+{
+    static const char *const codes[] = {
+        "NONE", "CONFIG_INVALID", "IDENTITY_INVALID", "IDENTITY_AMBIGUOUS",
+        "LOCAL_RELEASE_INVALID", "MANIFEST_HTTP", "MANIFEST_INVALID",
+        "DEVICE_COMPAT_MISMATCH", "VERSION_MALFORMED", "VERSION_COLLISION",
+        "DOWNGRADE_REJECTED", "DOWNLOAD_HTTP", "DOWNLOAD_RANGE_MISMATCH",
+        "DOWNLOAD_DISK_SPACE", "DOWNLOAD_SIZE_MISMATCH",
+        "DOWNLOAD_HASH_MISMATCH", "RAUC_VERIFY_FAILED",
+        "RAUC_COMPAT_MISMATCH", "RAUC_IDENTITY_MISMATCH",
+        "RAUC_INSTALL_FAILED", "RAUC_MARK_GOOD_FAILED",
+        "RAUC_MARK_BAD_FAILED", "HEALTH_FAILED", "REBOOT_CONTEXT_INVALID",
+        "REBOOT_FAILED", "PERSISTENCE_FAILED", "REPORT_FAILED",
+        "ILLEGAL_TRANSITION", "TIME_SOURCE_FAILED", "ENDPOINT_CONFIG_INVALID"
+    };
+    for (guint i = 0; i < G_N_ELEMENTS(codes); ++i)
+        if (!strcmp(code, codes[i]))
+            return TRUE;
+    return FALSE;
+}
+
+static gboolean bounded_status_text(const char *value)
+{
+    if (!value || strlen(value) > EGP_RELEASE_FIELD_MAX_BYTES)
+        return FALSE;
+    for (const guint8 *cursor = (const guint8 *)value; *cursor; ++cursor)
+        if (*cursor < 0x20 || *cursor > 0x7e)
+            return FALSE;
+    return TRUE;
+}
+
 static void refresh_identity(EgpStatus *status)
 {
     char *data = NULL;
@@ -195,14 +228,16 @@ static void refresh_release(EgpStatus *status)
 {
     char *data = NULL;
     gsize length = 0;
-    char release[EGP_MESSAGE_CAP] = {0}, build_id[EGP_MESSAGE_CAP] = {0};
+    char release[EGP_RELEASE_FIELD_MAX_BYTES + 1u] = {0};
+    char build_id[EGP_RELEASE_FIELD_MAX_BYTES + 1u] = {0};
     gboolean available = read_file(EGP_RELEASE_PATH, 64u * 1024u, FALSE,
                                    &data, &length);
     JsonObject *object = NULL;
     JsonParser *parser = available ? parse_object(data, length, &object) : NULL;
     available = parser && get_schema_one(object) &&
                 get_string(object, "version", release, sizeof(release)) &&
-                get_string(object, "build_id", build_id, sizeof(build_id));
+                get_string(object, "build_id", build_id, sizeof(build_id)) &&
+                bounded_status_text(release) && bounded_status_text(build_id);
     g_mutex_lock(&status->lock);
     status->release_available = available;
     memset(status->release, 0, sizeof(status->release));
@@ -234,7 +269,9 @@ static void refresh_agent(EgpStatus *status)
         JsonNode *last_node = json_object_get_member(object, "last_error");
         JsonObject *last = last_node && JSON_NODE_HOLDS_OBJECT(last_node) ?
                            json_node_get_object(last_node) : NULL;
-        available = last && get_string(last, "code", last_error, sizeof(last_error));
+        available = last && get_string(last, "code", last_error, sizeof(last_error)) &&
+                    (!attempt[0] || g_uuid_string_is_valid(attempt)) &&
+                    frozen_agent_error(last_error);
     }
     g_mutex_lock(&status->lock);
     status->agent_available = available;
@@ -476,14 +513,25 @@ static gboolean generate_json(JsonBuilder *builder,
     json_builder_add_string_value((builder), (value)); \
 } while (0)
 
-gboolean egp_status_device_info_json(EgpStatus *status,
-                                     char output[EGP_STATUS_MAX_JSON + 1u],
-                                     gsize *length, EgpError *error)
+static gboolean terminated(const char *value, gsize capacity)
 {
-    if (!status || !output)
+    return value && memchr(value, '\0', capacity) != NULL;
+}
+
+gboolean egp_status_serialize_device_info(
+    const EgpDeviceInfoValue *value,
+    char output[EGP_STATUS_MAX_JSON + 1u],
+    gsize *length, EgpError *error)
+{
+    if (!value || !output ||
+        !egp_provisioning_state_name(value->provisioning_state) ||
+        (value->device_available &&
+         !terminated(value->device_id, sizeof(value->device_id))) ||
+        (value->release_available &&
+         (!terminated(value->release, sizeof(value->release)) ||
+          !terminated(value->build_id, sizeof(value->build_id)))))
         return status_fail(error, EGP_ERROR_INTERNAL_ERROR,
                            "DeviceInfo output is invalid");
-    g_mutex_lock(&status->lock);
     JsonBuilder *builder = json_builder_new();
     json_builder_begin_object(builder);
     json_builder_set_member_name(builder, "schema_version");
@@ -491,19 +539,92 @@ gboolean egp_status_device_info_json(EgpStatus *status,
     json_builder_set_member_name(builder, "protocol_version");
     json_builder_add_int_value(builder, EGP_PROTOCOL_VERSION);
     json_builder_set_member_name(builder, "device_id_available");
-    json_builder_add_boolean_value(builder, status->device_available);
-    if (status->device_available)
-        ADD_STRING(builder, "device_id", status->device_id);
+    json_builder_add_boolean_value(builder, value->device_available);
+    if (value->device_available)
+        ADD_STRING(builder, "device_id", value->device_id);
     json_builder_set_member_name(builder, "release_available");
-    json_builder_add_boolean_value(builder, status->release_available);
-    if (status->release_available) {
-        ADD_STRING(builder, "release", status->release);
-        ADD_STRING(builder, "build_id", status->build_id);
+    json_builder_add_boolean_value(builder, value->release_available);
+    if (value->release_available) {
+        ADD_STRING(builder, "release", value->release);
+        ADD_STRING(builder, "build_id", value->build_id);
     }
     ADD_STRING(builder, "provisioning_state",
-               egp_provisioning_state_name(status->provisioning_state));
+               egp_provisioning_state_name(value->provisioning_state));
     json_builder_end_object(builder);
+    gboolean ok = generate_json(builder, output, length, error);
+    g_object_unref(builder);
+    return ok;
+}
+
+gboolean egp_status_device_info_json(EgpStatus *status,
+                                     char output[EGP_STATUS_MAX_JSON + 1u],
+                                     gsize *length, EgpError *error)
+{
+    if (!status || !output)
+        return status_fail(error, EGP_ERROR_INTERNAL_ERROR,
+                           "DeviceInfo output is invalid");
+    EgpDeviceInfoValue value = {0};
+    g_mutex_lock(&status->lock);
+    value.device_available = status->device_available;
+    g_strlcpy(value.device_id, status->device_id, sizeof(value.device_id));
+    value.release_available = status->release_available;
+    g_strlcpy(value.release, status->release, sizeof(value.release));
+    g_strlcpy(value.build_id, status->build_id, sizeof(value.build_id));
+    value.provisioning_state = status->provisioning_state;
     g_mutex_unlock(&status->lock);
+    return egp_status_serialize_device_info(&value, output, length, error);
+}
+
+gboolean egp_status_serialize_runtime(
+    const EgpRuntimeStatusValue *value,
+    char output[EGP_STATUS_MAX_JSON + 1u],
+    gsize *length, EgpError *error)
+{
+    if (!value || !output ||
+        !egp_provisioning_state_name(value->provisioning_state) ||
+        (value->effective_endpoint_available &&
+         (!terminated(value->effective_endpoint,
+                      sizeof(value->effective_endpoint)) ||
+          !terminated(value->effective_endpoint_source,
+                      sizeof(value->effective_endpoint_source)))) ||
+        (value->agent_state_available &&
+         (!terminated(value->agent_state, sizeof(value->agent_state)) ||
+          !terminated(value->attempt_id, sizeof(value->attempt_id)) ||
+          !terminated(value->last_ota_error,
+                      sizeof(value->last_ota_error)))) ||
+        (value->current_slot_available &&
+         !terminated(value->current_slot, sizeof(value->current_slot))))
+        return status_fail(error, EGP_ERROR_INTERNAL_ERROR,
+                           "RuntimeStatus output is invalid");
+    JsonBuilder *builder = json_builder_new();
+    json_builder_begin_object(builder);
+    json_builder_set_member_name(builder, "schema_version");
+    json_builder_add_int_value(builder, EGP_SCHEMA_VERSION);
+    ADD_STRING(builder, "provisioning_state",
+               egp_provisioning_state_name(value->provisioning_state));
+    json_builder_set_member_name(builder, "wifi_connected");
+    json_builder_add_boolean_value(builder, value->wifi_connected);
+    json_builder_set_member_name(builder, "effective_endpoint_available");
+    json_builder_add_boolean_value(builder, value->effective_endpoint_available);
+    if (value->effective_endpoint_available)
+        ADD_STRING(builder, "effective_endpoint", value->effective_endpoint);
+    if (value->effective_endpoint_available)
+        ADD_STRING(builder, "effective_endpoint_source",
+                   value->effective_endpoint_source);
+    if (value->runtime_config_invalid)
+        ADD_STRING(builder, "runtime_config_error", "ENDPOINT_CONFIG_INVALID");
+    json_builder_set_member_name(builder, "agent_state_available");
+    json_builder_add_boolean_value(builder, value->agent_state_available);
+    if (value->agent_state_available) {
+        ADD_STRING(builder, "agent_state", value->agent_state);
+        ADD_STRING(builder, "attempt_id", value->attempt_id);
+        ADD_STRING(builder, "last_ota_error", value->last_ota_error);
+    }
+    json_builder_set_member_name(builder, "current_slot_available");
+    json_builder_add_boolean_value(builder, value->current_slot_available);
+    if (value->current_slot_available)
+        ADD_STRING(builder, "current_slot", value->current_slot);
+    json_builder_end_object(builder);
     gboolean ok = generate_json(builder, output, length, error);
     g_object_unref(builder);
     return ok;
@@ -516,39 +637,27 @@ gboolean egp_status_runtime_json(EgpStatus *status,
     if (!status || !output)
         return status_fail(error, EGP_ERROR_INTERNAL_ERROR,
                            "RuntimeStatus output is invalid");
+    EgpRuntimeStatusValue value = {0};
     g_mutex_lock(&status->lock);
-    JsonBuilder *builder = json_builder_new();
-    json_builder_begin_object(builder);
-    json_builder_set_member_name(builder, "schema_version");
-    json_builder_add_int_value(builder, EGP_SCHEMA_VERSION);
-    ADD_STRING(builder, "provisioning_state",
-               egp_provisioning_state_name(status->provisioning_state));
-    json_builder_set_member_name(builder, "wifi_connected");
-    json_builder_add_boolean_value(builder, status->wifi_connected);
-    json_builder_set_member_name(builder, "effective_endpoint_available");
-    json_builder_add_boolean_value(builder, status->runtime_available);
-    if (status->runtime_available)
-        ADD_STRING(builder, "effective_endpoint", status->endpoint);
-    if (status->runtime_available)
-        ADD_STRING(builder, "effective_endpoint_source", status->endpoint_source);
-    if (status->runtime_config_invalid)
-        ADD_STRING(builder, "runtime_config_error", "ENDPOINT_CONFIG_INVALID");
-    json_builder_set_member_name(builder, "agent_state_available");
-    json_builder_add_boolean_value(builder, status->agent_available);
-    if (status->agent_available) {
-        ADD_STRING(builder, "agent_state", status->agent_state);
-        ADD_STRING(builder, "attempt_id", status->attempt_id);
-        ADD_STRING(builder, "last_ota_error", status->last_ota_error);
-    }
-    json_builder_set_member_name(builder, "current_slot_available");
-    json_builder_add_boolean_value(builder, status->slot_available);
-    if (status->slot_available)
-        ADD_STRING(builder, "current_slot", status->current_slot);
-    json_builder_end_object(builder);
+    value.provisioning_state = status->provisioning_state;
+    value.wifi_connected = status->wifi_connected;
+    value.effective_endpoint_available = status->runtime_available;
+    g_strlcpy(value.effective_endpoint, status->endpoint,
+              sizeof(value.effective_endpoint));
+    g_strlcpy(value.effective_endpoint_source, status->endpoint_source,
+              sizeof(value.effective_endpoint_source));
+    value.runtime_config_invalid = status->runtime_config_invalid;
+    value.agent_state_available = status->agent_available;
+    g_strlcpy(value.agent_state, status->agent_state,
+              sizeof(value.agent_state));
+    g_strlcpy(value.attempt_id, status->attempt_id, sizeof(value.attempt_id));
+    g_strlcpy(value.last_ota_error, status->last_ota_error,
+              sizeof(value.last_ota_error));
+    value.current_slot_available = status->slot_available;
+    g_strlcpy(value.current_slot, status->current_slot,
+              sizeof(value.current_slot));
     g_mutex_unlock(&status->lock);
-    gboolean ok = generate_json(builder, output, length, error);
-    g_object_unref(builder);
-    return ok;
+    return egp_status_serialize_runtime(&value, output, length, error);
 }
 
 static gboolean write_all(int fd, const void *buffer, gsize length)

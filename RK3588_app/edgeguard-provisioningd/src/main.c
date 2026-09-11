@@ -21,7 +21,7 @@ typedef struct {
     gboolean active_valid;
     EgpProtocolRequest active_request;
     char result_peer[EGP_DBUS_PATH_CAP];
-    char last_result[EGP_PROTOCOL_MAX_JSON + 1u];
+    char last_result[EGP_GATT_VALUE_MAX_BYTES + 1u];
     guint refresh_source;
     guint expire_source;
     guint connman_watch;
@@ -97,8 +97,12 @@ static void result_published(gpointer user_data, const char *peer_path,
                              const char *result_json)
 {
     Daemon *daemon = user_data;
-    if (!daemon->active_valid || strcmp(peer_path, daemon->active_request.peer_path))
+    gsize result_length = result_json ?
+        strnlen(result_json, EGP_GATT_VALUE_MAX_BYTES + 1u) : 0;
+    if (!daemon->active_valid || strcmp(peer_path, daemon->active_request.peer_path) ||
+        !result_length || result_length > EGP_GATT_VALUE_MAX_BYTES)
         return;
+    egp_bluez_invalidate_read(daemon->bluez, EGP_BLUEZ_OPERATION_RESULT, NULL);
     EgpError ignored = {0};
     egp_protocol_cache_result_id(daemon->protocol,
                                  daemon->active_request.peer_path,
@@ -122,7 +126,7 @@ static gboolean read_value(gpointer user_data, EgpBluezCharacteristic characteri
                            const char *peer_path, GBytes **value, EgpError *error)
 {
     Daemon *daemon = user_data;
-    char json[EGP_STATUS_MAX_JSON + 1u] = {0};
+    char json[EGP_GATT_VALUE_MAX_BYTES + 1u] = {0};
     gsize length = 0;
     if (characteristic == EGP_BLUEZ_DEVICE_INFO) {
         if (!egp_status_device_info_json(daemon->status, json, &length, error))
@@ -212,9 +216,16 @@ static gboolean write_value(gpointer user_data, EgpBluezCharacteristic character
         return TRUE;
     if (output.disposition == EGP_PROTOCOL_REPLAY) {
         if (output.cached_result[0]) {
-            g_strlcpy(daemon->result_peer, peer_path, sizeof(daemon->result_peer));
-            g_strlcpy(daemon->last_result, output.cached_result,
-                      sizeof(daemon->last_result));
+            gsize cached_length = strnlen(output.cached_result,
+                                          EGP_GATT_VALUE_MAX_BYTES + 1u);
+            if (cached_length && cached_length <= EGP_GATT_VALUE_MAX_BYTES) {
+                egp_bluez_invalidate_read(daemon->bluez,
+                                           EGP_BLUEZ_OPERATION_RESULT, NULL);
+                g_strlcpy(daemon->result_peer, peer_path,
+                          sizeof(daemon->result_peer));
+                g_strlcpy(daemon->last_result, output.cached_result,
+                          sizeof(daemon->last_result));
+            }
         }
         memset(&output, 0, sizeof(output));
         return TRUE;
@@ -259,6 +270,9 @@ static void peer_disconnected(gpointer user_data, const char *peer_path)
 {
     Daemon *daemon = user_data;
     egp_protocol_drop_peer(daemon->protocol, peer_path);
+    egp_bluez_invalidate_read(daemon->bluez, EGP_BLUEZ_DEVICE_INFO, peer_path);
+    egp_bluez_invalidate_read(daemon->bluez, EGP_BLUEZ_RUNTIME_STATUS, peer_path);
+    egp_bluez_invalidate_read(daemon->bluez, EGP_BLUEZ_OPERATION_RESULT, peer_path);
 }
 
 static gboolean connman_reconcile_retry(gpointer user_data);

@@ -43,6 +43,7 @@ Every operation result has a stable machine code, a non-secret short message, re
 | `OTA_CONTROL_REJECTED` | control | depends | none |
 | `FACTORY_RESET_BLOCKED` | unsupported/security | no in v1 | none |
 | `INTERNAL_ERROR` | implementation | bounded retry | no secret disclosed |
+| `BLE_INVALID_OFFSET` | protocol | restart read at offset zero | none |
 
 ## Mapping rules
 

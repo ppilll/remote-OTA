@@ -8,6 +8,8 @@
 
 G_BEGIN_DECLS
 
+#define EGP_OPERATION_RESULT_MAX_JSON EGP_GATT_VALUE_MAX_BYTES
+
 typedef struct _EgpOperations EgpOperations;
 
 typedef gboolean (*EgpAuthorizeCommit)(gpointer user_data, const char *peer_path,
@@ -30,6 +32,14 @@ gboolean egp_operations_submit(EgpOperations *operations,
                                const EgpProtocolRequest *request,
                                EgpError *error);
 gboolean egp_operations_busy(EgpOperations *operations);
+
+/* The live result publisher and worst-case behavior tests share this exact
+ * bounded serializer. A zero return means serialization failed. */
+gsize egp_operations_result_json(
+    const EgpProtocolRequest *request, const char *status,
+    const EgpError *operation_error, guint64 endpoint_generation,
+    const char *endpoint,
+    char output[EGP_OPERATION_RESULT_MAX_JSON + 1u]);
 
 typedef void (*EgpReconcileCompleted)(gpointer user_data, EgpErrorCode code,
                                       gboolean retryable);

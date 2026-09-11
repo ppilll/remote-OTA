@@ -1,4 +1,5 @@
 #include "edgeguard_provisioning/bluez.h"
+#include "edgeguard_provisioning/gatt_read.h"
 
 #include <string.h>
 
@@ -39,6 +40,7 @@ struct _EgpBluez {
     guint name_watch;
     guint properties_subscription;
     guint retry_source;
+    guint read_snapshot_timeout_source;
     GMutex peer_lock;
     GHashTable *peer_epochs;
     guint64 next_peer_epoch;
@@ -49,7 +51,11 @@ struct _EgpBluez {
     gboolean agent_registered;
     char unique_owner[64];
     char adapter_path[EGP_DBUS_PATH_CAP];
+    EgpGattReadSnapshot read_snapshot;
 };
+
+static guint64 peer_epoch_locked(EgpBluez *bluez, const char *peer_path,
+                                 gboolean create);
 
 static const char manager_xml[] =
     "<node><interface name='org.freedesktop.DBus.ObjectManager'>"
@@ -192,6 +198,8 @@ static void return_error(GDBusMethodInvocation *invocation, const EgpError *erro
         name = "org.bluez.Error.NotAuthorized";
     else if (error->code == EGP_ERROR_BLE_PAYLOAD_TOO_LARGE)
         name = "org.bluez.Error.InvalidValueLength";
+    else if (error->code == EGP_ERROR_BLE_INVALID_OFFSET)
+        name = "org.bluez.Error.InvalidOffset";
     else if (error->code == EGP_ERROR_BLE_PAYLOAD_INVALID ||
              error->code == EGP_ERROR_BLE_FRAGMENT_CONFLICT ||
              error->code == EGP_ERROR_BLE_REPLAY_REJECTED)
@@ -204,32 +212,43 @@ static void return_error(GDBusMethodInvocation *invocation, const EgpError *erro
                                                 "Request rejected");
 }
 
-static gboolean get_peer_option(GVariant *options, gboolean required,
-                                char **peer, guint16 *mtu_out, EgpError *error)
+static void clear_read_snapshot(EgpBluez *bluez)
 {
-    *peer = NULL;
-    guint16 offset = 0;
-    guint16 mtu = 0;
-    gboolean prepare = FALSE;
-    g_variant_lookup(options, "offset", "q", &offset);
-    gboolean has_mtu = g_variant_lookup(options, "mtu", "q", &mtu);
-    g_variant_lookup(options, "prepare-authorize", "b", &prepare);
-    GVariant *device = g_variant_lookup_value(options, "device",
-                                              G_VARIANT_TYPE_OBJECT_PATH);
-    if (device) {
-        *peer = g_strdup(g_variant_get_string(device, NULL));
-        g_variant_unref(device);
+    if (!bluez)
+        return;
+    if (bluez->read_snapshot_timeout_source) {
+        g_source_remove(bluez->read_snapshot_timeout_source);
+        bluez->read_snapshot_timeout_source = 0;
     }
-    if (mtu_out)
-        *mtu_out = has_mtu ? mtu : 0;
-    if (offset || prepare || (has_mtu && (mtu < 23 || mtu > 517)) ||
-        (required && !*peer)) {
-        egp_error_set(error, EGP_ERROR_BLE_PAYLOAD_INVALID, TRUE,
-                      EGP_PERSISTENT_CHANGE_NONE,
-                      "Unsupported GATT options or missing device identity");
-        return FALSE;
-    }
-    return TRUE;
+    egp_gatt_read_snapshot_clear(&bluez->read_snapshot);
+}
+
+static gboolean expire_read_snapshot(gpointer user_data)
+{
+    EgpBluez *bluez = user_data;
+    bluez->read_snapshot_timeout_source = 0;
+    egp_gatt_read_snapshot_clear(&bluez->read_snapshot);
+    return G_SOURCE_REMOVE;
+}
+
+static void arm_read_snapshot_timeout(EgpBluez *bluez)
+{
+    if (bluez->read_snapshot_timeout_source)
+        g_source_remove(bluez->read_snapshot_timeout_source);
+    bluez->read_snapshot_timeout_source = g_timeout_add(
+        (guint)(EGP_GATT_READ_SNAPSHOT_TTL_US / 1000),
+        expire_read_snapshot, bluez);
+}
+
+static gboolean read_context(EgpBluez *bluez, const char *peer_path,
+                             char owner[EGP_BLUEZ_OWNER_CAP],
+                             guint64 *security_epoch, gboolean create)
+{
+    g_mutex_lock(&bluez->peer_lock);
+    g_strlcpy(owner, bluez->unique_owner, EGP_BLUEZ_OWNER_CAP);
+    *security_epoch = peer_epoch_locked(bluez, peer_path, create);
+    g_mutex_unlock(&bluez->peer_lock);
+    return owner[0] && *security_epoch;
 }
 
 static void manager_call(Export *export, GDBusMethodInvocation *invocation)
@@ -261,18 +280,72 @@ static void characteristic_call(Export *export, const char *method,
     if (!strcmp(method, "ReadValue")) {
         GVariant *options = NULL;
         g_variant_get(parameters, "(@a{sv})", &options);
-        char *peer = NULL;
-        gboolean ok = get_peer_option(options,
-                                     export->characteristic != EGP_BLUEZ_DEVICE_INFO,
-                                     &peer, NULL, &error);
+        EgpGattOptions parsed = {0};
+        gboolean ok = egp_gatt_parse_read_options(options, TRUE, &parsed,
+                                                   &error);
         GBytes *value = NULL;
-        if (ok && bluez->handlers.read_value)
-            ok = bluez->handlers.read_value(bluez->handlers.user_data,
-                                            export->characteristic, peer,
-                                            &value, &error);
+        char owner[EGP_BLUEZ_OWNER_CAP] = {0};
+        guint64 security_epoch = 0;
+        if (ok)
+            ok = read_context(bluez, parsed.peer_path, owner,
+                              &security_epoch, parsed.offset == 0);
+        if (!ok && error.code == EGP_ERROR_NONE)
+            egp_error_set(&error,
+                          parsed.offset ? EGP_ERROR_BLE_INVALID_OFFSET :
+                                          EGP_ERROR_BLUEZ_UNAVAILABLE,
+                          TRUE, EGP_PERSISTENT_CHANGE_NONE,
+                          parsed.offset ?
+                              "Read snapshot is unavailable; restart at offset zero" :
+                              "Active BlueZ read context is unavailable");
+        if (ok && parsed.offset == 0) {
+            GBytes *serialized = NULL;
+            if (!bluez->handlers.read_value) {
+                egp_error_set(&error, EGP_ERROR_INTERNAL_ERROR, TRUE,
+                              EGP_PERSISTENT_CHANGE_NONE,
+                              "ReadValue handler is unavailable");
+                ok = FALSE;
+            } else
+                ok = bluez->handlers.read_value(bluez->handlers.user_data,
+                                                 export->characteristic,
+                                                 parsed.peer_path,
+                                                 &serialized, &error);
+            char owner_after[EGP_BLUEZ_OWNER_CAP] = {0};
+            guint64 epoch_after = 0;
+            if (ok && (!read_context(bluez, parsed.peer_path, owner_after,
+                                     &epoch_after, FALSE) ||
+                       strcmp(owner, owner_after) ||
+                       security_epoch != epoch_after)) {
+                egp_error_set(&error, EGP_ERROR_BLE_UNAUTHORIZED, TRUE,
+                              EGP_PERSISTENT_CHANGE_NONE,
+                              "Read security context changed during serialization");
+                ok = FALSE;
+            }
+            if (ok) {
+                gsize serialized_length = 0;
+                const guint8 *serialized_data = g_bytes_get_data(
+                    serialized, &serialized_length);
+                ok = egp_gatt_read_snapshot_begin(
+                    &bluez->read_snapshot, owner, parsed.peer_path,
+                    export->characteristic, security_epoch, serialized_data,
+                    serialized_length, g_get_monotonic_time(), &error);
+                if (ok)
+                    arm_read_snapshot_timeout(bluez);
+            }
+            if (serialized)
+                g_bytes_unref(serialized);
+        }
+        if (ok)
+            ok = egp_gatt_read_snapshot_slice(
+                &bluez->read_snapshot, owner, parsed.peer_path,
+                export->characteristic, security_epoch, parsed.offset,
+                parsed.mtu, g_get_monotonic_time(), &value, &error);
+        if (ok && !bluez->read_snapshot.valid &&
+            bluez->read_snapshot_timeout_source) {
+            g_source_remove(bluez->read_snapshot_timeout_source);
+            bluez->read_snapshot_timeout_source = 0;
+        }
         g_variant_unref(options);
         if (!ok) {
-            g_free(peer);
             if (value)
                 g_bytes_unref(value);
             return_error(invocation, &error);
@@ -281,7 +354,6 @@ static void characteristic_call(Export *export, const char *method,
         GVariant *bytes = bytes_variant(value);
         if (value)
             g_bytes_unref(value);
-        g_free(peer);
         g_dbus_method_invocation_return_value(invocation,
                                                g_variant_new("(@ay)", bytes));
         return;
@@ -289,12 +361,11 @@ static void characteristic_call(Export *export, const char *method,
     if (!strcmp(method, "WriteValue")) {
         GVariant *bytes = NULL, *options = NULL;
         g_variant_get(parameters, "(@ay@a{sv})", &bytes, &options);
-        char *peer = NULL;
-        guint16 mtu = 0;
-        gboolean ok = get_peer_option(options, TRUE, &peer, &mtu, &error);
+        EgpGattOptions parsed = {0};
+        gboolean ok = egp_gatt_parse_write_options(options, &parsed, &error);
         gsize length = 0;
         const guint8 *value = g_variant_get_fixed_array(bytes, &length, 1);
-        if (ok && mtu && length > (gsize)(mtu - 3u)) {
+        if (ok && parsed.mtu && length > (gsize)(parsed.mtu - 3u)) {
             egp_error_set(&error, EGP_ERROR_BLE_PAYLOAD_TOO_LARGE, TRUE,
                           EGP_PERSISTENT_CHANGE_NONE,
                           "GATT write exceeds the negotiated MTU");
@@ -302,16 +373,15 @@ static void characteristic_call(Export *export, const char *method,
         }
         if (ok && bluez->handlers.write_value)
             ok = bluez->handlers.write_value(bluez->handlers.user_data,
-                                             export->characteristic, peer,
+                                             export->characteristic,
+                                             parsed.peer_path,
                                              value, length, &error);
         g_variant_unref(bytes);
         g_variant_unref(options);
         if (!ok) {
-            g_free(peer);
             return_error(invocation, &error);
             return;
         }
-        g_free(peer);
         g_dbus_method_invocation_return_value(invocation, NULL);
         return;
     }
@@ -595,6 +665,9 @@ static void bump_peer_epoch(EgpBluez *bluez, const char *peer_path)
     }
     *stored = next_epoch_locked(bluez);
     g_mutex_unlock(&bluez->peer_lock);
+    if (bluez->read_snapshot.valid &&
+        !strcmp(bluez->read_snapshot.peer_path, peer_path))
+        clear_read_snapshot(bluez);
 }
 
 static gboolean retry_registration(gpointer user_data)
@@ -653,6 +726,7 @@ static void name_appeared(GDBusConnection *connection, const char *name,
 {
     (void)connection; (void)name;
     EgpBluez *bluez = user_data;
+    clear_read_snapshot(bluez);
     g_mutex_lock(&bluez->peer_lock);
     g_strlcpy(bluez->unique_owner, owner, sizeof(bluez->unique_owner));
     g_hash_table_remove_all(bluez->peer_epochs);
@@ -667,6 +741,7 @@ static void name_vanished(GDBusConnection *connection, const char *name,
 {
     (void)connection; (void)name;
     EgpBluez *bluez = user_data;
+    clear_read_snapshot(bluez);
     g_mutex_lock(&bluez->peer_lock);
     memset(bluez->unique_owner, 0, sizeof(bluez->unique_owner));
     g_hash_table_remove_all(bluez->peer_epochs);
@@ -799,6 +874,9 @@ void egp_bluez_set_window(EgpBluez *bluez, gboolean open)
 {
     if (!bluez)
         return;
+    /* This callback also represents an open-to-open authorization epoch
+     * change, so no read continuation crosses it. */
+    clear_read_snapshot(bluez);
     bluez->window_open = open;
     if (!bluez->bluez_present || !bluez->adapter_path[0])
         return;
@@ -815,6 +893,17 @@ void egp_bluez_set_window(EgpBluez *bluez, gboolean open)
                    "UnregisterAdvertisement", g_variant_new("(o)", EGP_DBUS_ADVERTISEMENT));
         bluez->advertisement_registered = FALSE;
     }
+}
+
+void egp_bluez_invalidate_read(EgpBluez *bluez,
+                               EgpBluezCharacteristic characteristic,
+                               const char *peer_path)
+{
+    if (!bluez || !bluez->read_snapshot.valid ||
+        bluez->read_snapshot.characteristic != (guint)characteristic)
+        return;
+    if (!peer_path || !strcmp(peer_path, bluez->read_snapshot.peer_path))
+        clear_read_snapshot(bluez);
 }
 
 gboolean egp_bluez_peer_security(EgpBluez *bluez, const char *peer_path,
@@ -939,6 +1028,7 @@ void egp_bluez_free(EgpBluez *bluez)
 {
     if (!bluez)
         return;
+    clear_read_snapshot(bluez);
     if (bluez->bluez_present && bluez->adapter_path[0]) {
         set_pairable(bluez, FALSE);
         if (bluez->advertisement_registered)

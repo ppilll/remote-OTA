@@ -45,6 +45,9 @@ EgpBluez *egp_bluez_new(GDBusConnection *connection,
                         const EgpBluezHandlers *handlers, EgpError *error);
 void egp_bluez_free(EgpBluez *bluez);
 void egp_bluez_set_window(EgpBluez *bluez, gboolean open);
+void egp_bluez_invalidate_read(EgpBluez *bluez,
+                               EgpBluezCharacteristic characteristic,
+                               const char *peer_path);
 gboolean egp_bluez_peer_security(EgpBluez *bluez, const char *peer_path,
                                  gboolean encrypted_gatt_gate,
                                  EgpPeerSecurity *peer, EgpError *error);

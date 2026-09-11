@@ -2,7 +2,7 @@
 #define EDGEGUARD_OTA_CONFIG_H
 #include "model.h"
 
-#define OTA_ENDPOINT_MAX_BYTES 512u
+#define OTA_ENDPOINT_MAX_BYTES 64u
 
 typedef struct {
     char base_url[OTA_ENDPOINT_MAX_BYTES + 1u];
